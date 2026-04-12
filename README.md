@@ -148,7 +148,23 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### 4. Monte Carlo Options Pricing
+### 4. Running the Quantra Bloomberg Terminal
+
+1. **Start the FastAPI Backend Database/ML API:**
+   ```bash
+   uvicorn api.main:app --reload
+   ```
+
+2. **Open the Terminal UI:**
+   Open `quantra-terminal.html` in your web browser. 
+
+3. **Explore the AI Features:**
+   Type the following commands directly into the Quantra Terminal:
+   - `ANALYZE RELIANCE <GO>` — Get full fundamental, technical, sentiment, and AI risk prediction overlays.
+   - `SIGNALS <GO>` — Pull real-time confidence scores from the Ensemble Modeling Engine.
+   - `HELP <GO>` — View all available commands.
+
+### 5. Monte Carlo Options Pricing
 
 ```python
 from src.options.monte_carlo import price_european_call
@@ -157,7 +173,7 @@ res = price_european_call(S=18500, K=19000, T=0.25, r=0.065, sigma=0.18)
 print(f"MC Price: ₹{res.price:.2f} | 95% CI: [{res.ci_lower:.2f}, {res.ci_upper:.2f}]")
 ```
 
-### 5. Black-Scholes Greeks
+### 6. Black-Scholes Greeks
 
 ```python
 from src.options.black_scholes import greeks
@@ -167,7 +183,7 @@ print(res)
 # {'delta': 0.4231, 'gamma': 0.0003, 'vega': 28.14, 'theta': -6.72, 'rho': 10.83}
 ```
 
-### 6. Markowitz Efficient Frontier
+### 7. Markowitz Efficient Frontier
 
 ```python
 from src.portfolio.markowitz import run as run_optimizer
