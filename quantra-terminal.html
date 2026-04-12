@@ -579,6 +579,12 @@ function formatPnl(n) { return (n >= 0 ? '+' : '') + '₹' + new Intl.NumberForm
   <div>QAOA &lt;GO&gt; &nbsp;- Highlight Quantum Status</div>
   <div>OVDV &lt;GO&gt; &nbsp;- Highlight Volatility Surface</div>
   <div>FLOW &lt;GO&gt; &nbsp;- Highlight FII/DII</div>
+  <div style="border-top:1px solid #333; margin:8px 0; padding-top:4px;"></div>
+  <div>BACKTEST &lt;GO&gt; &nbsp;- Run historical portfolio backtest via API</div>
+  <div>COMPARE &lt;GO&gt; &nbsp;- Benchmark Markowitz vs QAOA historically</div>
+  <div style="border-top:1px solid #333; margin:8px 0; padding-top:4px; color:var(--accent);">MONTH 4 — ML/DL INTELLIGENCE</div>
+  <div>ANALYZE &lt;TICKER&gt; &lt;GO&gt; &nbsp;- Full stock analysis (tech+fund+sentiment+ML)</div>
+  <div>SIGNALS &lt;GO&gt; &nbsp;- Live ML signals for watchlist</div>
   <div style="margin-top:10px; color:#888; font-size:9px;">[CLICK ANYWHERE TO CLOSE]</div>
 </div>
 
@@ -1073,6 +1079,23 @@ function parseCmd() {
     cmdInput.value = '';
     sts.innerText = '';
     overlay.style.display = 'none';
+  } else if (raw === 'BACKTEST') {
+    runBacktestAction();
+    cmdInput.value = '';
+    sts.innerText = '';
+  } else if (raw === 'COMPARE') {
+    compareAction();
+    cmdInput.value = '';
+    sts.innerText = '';
+  } else if (raw.startsWith('ANALYZE')) {
+    const ticker = raw.replace('ANALYZE', '').trim() || 'RELIANCE';
+    runAnalyzeAction(ticker);
+    cmdInput.value = '';
+    sts.innerText = '';
+  } else if (raw === 'SIGNALS') {
+    runSignalsAction();
+    cmdInput.value = '';
+    sts.innerText = '';
   } else if (raw.includes('HELP')) {
     overlay.style.display = 'block';
     cmdInput.value = '';
@@ -1082,6 +1105,89 @@ function parseCmd() {
     setTimeout(() => { if(sts.innerText.includes("INVALID")) sts.innerText = ''; }, 3000);
   }
 }
+
+async function runBacktestAction() {
+    const sts = document.getElementById('cmd-status');
+    const tickers = QUANTRA_DATA.portfolio.map(p => p.sym + ".NS");
+    const weights = {};
+    QUANTRA_DATA.portfolio.forEach(p => { weights[p.sym + ".NS"] = p.wght / 100.0; });
+    
+    sts.innerText = "EXECUTING BACKTEST...";
+    sts.style.color = "var(--accent)";
+    
+    try {
+        const res = await fetch('http://localhost:8000/backtest/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                tickers: tickers,
+                weights: weights,
+                start_date: "2022-01-01",
+                end_date: "2024-01-01",
+                initial_capital: 1000000.0,
+                rebalance_freq: "monthly"
+            })
+        });
+        const data = await res.json();
+        sts.innerText = "BACKTEST COMPLETE: SHARPE " + data.metrics.sharpe_ratio.toFixed(2);
+        sts.style.color = "var(--pos)";
+        console.log("Backtest Metrics:", data.metrics);
+        setTimeout(() => sts.innerText='', 5000);
+    } catch(e) {
+        sts.innerText = "API ERROR: OFFLINE";
+        sts.style.color = "var(--neg)";
+        setTimeout(() => sts.innerText='', 3000);
+    }
+}
+
+async function compareAction() {
+    const sts = document.getElementById('cmd-status');
+    const tickers = QUANTRA_DATA.portfolio.map(p => p.sym + ".NS");
+    
+    sts.innerText = "RUNNING QVC COMPARISON...";
+    sts.style.color = "var(--accent)";
+    
+    try {
+        const res = await fetch('http://localhost:8000/backtest/quantum-vs-classical', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                tickers: tickers,
+                start_date: "2022-01-01",
+                end_date: "2024-01-01"
+            })
+        });
+        const data = await res.json();
+        sts.innerText = "COMPARE COMPLETE! CHECK CONSOLE.";
+        sts.style.color = "var(--pos)";
+        console.log("Classical:", data.classical.metrics);
+        console.log("Quantum:", data.quantum.metrics);
+        setTimeout(() => sts.innerText='', 5000);
+    } catch(e) {
+        sts.innerText = "API ERROR: OFFLINE";
+        sts.style.color = "var(--neg)";
+        setTimeout(() => sts.innerText='', 3000);
+    }
+}
+
+async function checkApiConnection() {
+    try {
+        let res = await fetch('http://localhost:8000/health');
+        if(res.ok) {
+            document.querySelector('.quantra-sub').innerText += " [API: LIVE]";
+            document.querySelector('.quantra-sub').style.color = "var(--pos)";
+        }
+    } catch(e) {
+        console.log("API offline, falling back to mock mode");
+    }
+}
+
+const originalInit = init;
+init = function() {
+    originalInit();
+    checkApiConnection();
+};
+
 
 function hl(id) {
   // Highlight and scroll panel
@@ -1096,9 +1202,216 @@ function hl(id) {
   }
 }
 
+// ─── MONTH 4: ML INTELLIGENCE LAYER ───
+
+async function runAnalyzeAction(ticker) {
+  const sts = document.getElementById('cmd-status');
+  // Create fullscreen overlay
+  let overlay = document.getElementById('analyze-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'analyze-overlay';
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.95); z-index: 9999;
+      display: flex; flex-direction: column; padding: 20px;
+      font-family: 'IBM Plex Mono', monospace; color: #ccc;
+      overflow-y: auto; cursor: pointer;
+    `;
+    overlay.addEventListener('click', () => { overlay.style.display = 'none'; });
+    document.body.appendChild(overlay);
+  }
+
+  overlay.innerHTML = `
+    <div style="color:var(--accent); font-size:14px; font-weight:bold; margin-bottom:4px;">
+      ⏳ ANALYZING ${ticker}...
+    </div>
+    <div style="color:#888; font-size:10px;">Fetching technical + fundamental + sentiment + ML signals...</div>
+    <div style="margin-top:15px;">
+      <div class="loading-bar" style="width:0; height:2px; background:var(--accent); transition: width 3s ease;"></div>
+    </div>
+  `;
+  overlay.style.display = 'flex';
+  setTimeout(() => {
+    const bar = overlay.querySelector('.loading-bar');
+    if (bar) bar.style.width = '80%';
+  }, 50);
+
+  try {
+    const res = await fetch('http://localhost:8000/analyze/stock', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ticker: ticker, exchange: 'NSE', mode: 'swing' })
+    });
+    const data = await res.json();
+
+    // Build analysis display
+    const verdict = data.verdict || 'HOLD';
+    const vColor = verdict.includes('BUY') ? 'var(--pos)' :
+                   verdict.includes('SELL') ? 'var(--neg)' : 'var(--accent)';
+    const plan = data.trade_plan || {};
+    const tech = data.technical || {};
+    const riskLevel = data.risk_level || 'MEDIUM';
+    const riskColor = riskLevel === 'HIGH' || riskLevel === 'EXTREME' ? 'var(--neg)' :
+                      riskLevel === 'LOW' ? 'var(--pos)' : '#ffaa00';
+
+    overlay.innerHTML = `
+      <div style="max-width:900px; margin:0 auto; width:100%;">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; padding-bottom:8px; margin-bottom:12px;">
+          <div>
+            <span style="color:var(--accent); font-size:16px; font-weight:bold;">QUANTRA ANALYZE</span>
+            <span style="color:#888; font-size:11px; margin-left:12px;">${ticker} • NSE</span>
+          </div>
+          <div style="font-size:9px; color:#555;">CLICK ANYWHERE TO CLOSE</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:16px;">
+          <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+            <div style="color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Verdict</div>
+            <div style="color:${vColor}; font-size:22px; font-weight:bold; margin-top:4px;">${verdict}</div>
+            <div style="color:#666; font-size:10px; margin-top:2px;">Score: ${(plan.composite_score || 0).toFixed(2)}</div>
+          </div>
+          <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+            <div style="color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Risk Level</div>
+            <div style="color:${riskColor}; font-size:22px; font-weight:bold; margin-top:4px;">${riskLevel}</div>
+            <div style="color:#666; font-size:10px; margin-top:2px;">Fund: ${data.fundamental_grade || 'N/A'} | Mood: ${data.sentiment_mood || 'N/A'}</div>
+          </div>
+          <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+            <div style="color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">ML Signal</div>
+            <div style="color:${data.ml_signal === 'BUY' ? 'var(--pos)' : data.ml_signal === 'SELL' ? 'var(--neg)' : '#aaa'}; font-size:22px; font-weight:bold; margin-top:4px;">
+              ${data.ml_signal || 'UNTRAINED'}
+            </div>
+            <div style="color:#666; font-size:10px; margin-top:2px;">Ensemble prediction</div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+          <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+            <div style="color:var(--accent); font-size:11px; font-weight:bold; margin-bottom:8px;">📊 TRADE PLAN</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; font-size:10px;">
+              <div style="color:#888;">Entry:</div><div>₹${plan.entry_price || '—'}</div>
+              <div style="color:#888;">Stop Loss:</div><div style="color:var(--neg);">₹${plan.stop_loss || '—'}</div>
+              <div style="color:#888;">Target 1:</div><div style="color:var(--pos);">₹${plan.target_1 || '—'}</div>
+              <div style="color:#888;">Target 2:</div><div style="color:var(--pos);">₹${plan.target_2 || '—'}</div>
+              <div style="color:#888;">R:R Ratio:</div><div>${plan.risk_reward || '—'}</div>
+              <div style="color:#888;">Resistance:</div><div>₹${plan.key_resistance || '—'}</div>
+              <div style="color:#888;">Support:</div><div>₹${plan.key_support || '—'}</div>
+            </div>
+          </div>
+          <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+            <div style="color:var(--accent); font-size:11px; font-weight:bold; margin-bottom:8px;">📈 TECHNICAL</div>
+            <div style="font-size:10px;">
+              <div>Structure: <span style="color:${tech.structure_trend === 'UPTREND' ? 'var(--pos)' : tech.structure_trend === 'DOWNTREND' ? 'var(--neg)' : '#aaa'};">${tech.structure_trend || 'N/A'}</span></div>
+              <div style="margin-top:4px;">Pattern Strength: <span style="color:${(tech.pattern_strength||0) > 0 ? 'var(--pos)' : (tech.pattern_strength||0) < 0 ? 'var(--neg)' : '#aaa'};">${tech.pattern_strength || 0}</span></div>
+              ${(tech.trend_signals || []).map(s => `<div style="color:#aaa; margin-top:2px;">• ${s}</div>`).join('')}
+              ${(tech.active_patterns || []).length > 0 ? `<div style="margin-top:4px; color:#ffaa00;">Patterns: ${(tech.active_patterns||[]).slice(0,3).join(', ')}</div>` : ''}
+            </div>
+          </div>
+        </div>
+
+        ${data.summary ? `
+        <div style="background:#0d0d0d; border:1px solid #222; padding:12px; border-radius:4px;">
+          <div style="color:var(--accent); font-size:11px; font-weight:bold; margin-bottom:8px;">📝 FULL REPORT</div>
+          <pre style="white-space:pre-wrap; font-size:10px; color:#aaa; line-height:1.5; max-height:300px; overflow-y:auto; margin:0;">${data.summary}</pre>
+        </div>` : ''}
+      </div>
+    `;
+  } catch(e) {
+    overlay.innerHTML = `
+      <div style="color:var(--neg); font-size:14px; font-weight:bold;">⚠ ANALYSIS FAILED</div>
+      <div style="color:#888; font-size:11px; margin-top:8px;">API Error: ${e.message}</div>
+      <div style="color:#888; font-size:11px; margin-top:4px;">Make sure the backend is running: uvicorn api.main:app --reload</div>
+      <div style="color:#555; font-size:9px; margin-top:16px;">CLICK ANYWHERE TO CLOSE</div>
+    `;
+  }
+}
+
+async function runSignalsAction() {
+  const sts = document.getElementById('cmd-status');
+  let overlay = document.getElementById('signals-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'signals-overlay';
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.95); z-index: 9999;
+      display: flex; flex-direction: column; padding: 20px;
+      font-family: 'IBM Plex Mono', monospace; color: #ccc;
+      overflow-y: auto; cursor: pointer;
+    `;
+    overlay.addEventListener('click', () => { overlay.style.display = 'none'; });
+    document.body.appendChild(overlay);
+  }
+
+  overlay.innerHTML = `
+    <div style="color:var(--accent); font-size:14px; font-weight:bold;">⏳ LOADING SIGNALS...</div>
+  `;
+  overlay.style.display = 'flex';
+
+  try {
+    const res = await fetch('http://localhost:8000/analyze/signals');
+    const data = await res.json();
+    const signals = data.signals || [];
+
+    let rows = '';
+    signals.forEach(s => {
+      const sigColor = s.signal === 'BUY' || s.signal === 'STRONG BUY' ? 'var(--pos)' :
+                       s.signal === 'SELL' || s.signal === 'STRONG SELL' ? 'var(--neg)' :
+                       s.signal === 'NO TRADE' ? '#ff8800' : '#aaa';
+      const confBar = Math.round((s.confidence || 0) * 100);
+      rows += `
+        <tr style="border-bottom:1px solid #1a1a1a;">
+          <td style="padding:8px 12px; color:var(--accent); font-weight:bold;">${s.ticker}</td>
+          <td style="padding:8px 12px; color:${sigColor}; font-weight:bold; font-size:12px;">${s.signal}</td>
+          <td style="padding:8px 12px;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <div style="width:80px; height:4px; background:#222; border-radius:2px;">
+                <div style="width:${confBar}%; height:100%; background:${sigColor}; border-radius:2px;"></div>
+              </div>
+              <span style="font-size:10px; color:#888;">${confBar}%</span>
+            </div>
+          </td>
+          <td style="padding:8px 12px; color:#888; font-size:10px;">${s.agreement || '—'}</td>
+        </tr>
+      `;
+    });
+
+    overlay.innerHTML = `
+      <div style="max-width:700px; margin:0 auto; width:100%;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <div>
+            <span style="color:var(--accent); font-size:16px; font-weight:bold;">⚡ LIVE SIGNALS</span>
+            <span style="color:#888; font-size:10px; margin-left:8px;">ML Ensemble • Watchlist</span>
+          </div>
+          <div style="font-size:9px; color:#555;">CLICK ANYWHERE TO CLOSE</div>
+        </div>
+        <table style="width:100%; border-collapse:collapse; background:#0a0a0a; border:1px solid #222; border-radius:4px;">
+          <thead>
+            <tr style="border-bottom:1px solid #333;">
+              <th style="padding:8px 12px; text-align:left; color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Ticker</th>
+              <th style="padding:8px 12px; text-align:left; color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Signal</th>
+              <th style="padding:8px 12px; text-align:left; color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Confidence</th>
+              <th style="padding:8px 12px; text-align:left; color:#888; font-size:9px; text-transform:uppercase; letter-spacing:0.1em;">Agreement</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:12px; color:#555; font-size:9px; text-align:center;">Quantra Intelligence Engine v4.0 — Not financial advice</div>
+      </div>
+    `;
+  } catch(e) {
+    overlay.innerHTML = `
+      <div style="color:var(--neg); font-size:14px; font-weight:bold;">⚠ SIGNALS UNAVAILABLE</div>
+      <div style="color:#888; font-size:11px; margin-top:8px;">API Error: ${e.message}</div>
+      <div style="color:#555; font-size:9px; margin-top:16px;">CLICK ANYWHERE TO CLOSE</div>
+    `;
+  }
+}
+
 // Bootstrap
 window.onload = init;
 
 </script>
 </body>
 </html>
+

@@ -21,6 +21,17 @@
 - **Live Market Data Integration** — Fetches real-time and historical OHLCV data for Nifty 50 constituents via `yfinance`, enabling live backtesting and forward analysis
 - **Modular Research Architecture** — Each module is independently importable and testable, designed for seamless integration with the upcoming quantum layer of Quantra
 
+### Month 4 — ML/DL Intelligence Layer
+
+- **50+ Technical Indicators** — RSI, MACD, SuperTrend, Bollinger Bands, ATR, VWAP, OBV, Stochastic, ADX, Ichimoku, and candlestick pattern recognition across multiple timeframes
+- **Fundamental Analysis Engine** — Automated company valuation using PE, PB, ROE, debt-to-equity, revenue growth, and institutional activity via yfinance
+- **FinBERT Sentiment Analysis** — Real-time financial news sentiment using ProsusAI/finbert with Finnhub and Google News RSS integration
+- **Ensemble ML Predictions** — XGBoost + Bidirectional LSTM + Temporal Fusion Transformer with dynamic weighting and Kelly Criterion position sizing
+- **PPO Reinforcement Learning Agent** — Self-improving trading agent using Proximal Policy Optimization with asymmetric reward shaping and conservative policy updates
+- **Paper Trading Engine** — Simulated broker with realistic NSE charges, slippage, and persistent trade journal for risk-free strategy testing
+- **Zerodha Kite Scaffold** — Production-ready integration hooks for live trading (disabled by default for safety)
+- **Bloomberg Terminal Integration** — `ANALYZE <TICKER>` and `SIGNALS` commands in the terminal UI with rich overlay displays
+
 ---
 
 ## Tech Stack
@@ -34,6 +45,12 @@
 | `SciPy` | Statistical distributions (norm CDF/PDF) for Black-Scholes |
 | `CVXPY` | Convex optimization for Markowitz portfolio construction |
 | `Matplotlib` | Efficient frontier visualization, P&L surface plots |
+| `PyTorch` | LSTM and Temporal Fusion Transformer deep learning models |
+| `XGBoost` | Gradient boosting for tabular feature classification |
+| `Stable-Baselines3` | PPO reinforcement learning agent |
+| `Transformers` | FinBERT sentiment analysis |
+| `Optuna` | Bayesian hyperparameter optimization |
+| `ta` | Technical indicator computation (fallback) |
 
 ---
 
@@ -57,13 +74,50 @@ classical-quant-engine/
 │   │   ├── qaoa_circuit.py
 │   │   ├── qaoa_optimizer.py
 │   │   └── benchmarker.py
+│   ├── ml/                      # Month 4 — ML/DL Intelligence Layer
+│   │   ├── features/            # Feature engineering pipeline
+│   │   │   ├── technical.py     # 50+ technical indicators
+│   │   │   ├── fundamental.py   # Company fundamental data
+│   │   │   ├── sentiment.py     # FinBERT NLP sentiment analysis
+│   │   │   └── pipeline.py      # Unified feature pipeline
+│   │   ├── models/              # Ensemble prediction engine
+│   │   │   ├── xgboost_model.py # XGBoost with Optuna HPO
+│   │   │   ├── lstm_model.py    # BiLSTM with attention
+│   │   │   ├── transformer_model.py  # Temporal Fusion Transformer
+│   │   │   └── ensemble.py      # Weighted ensemble combiner
+│   │   ├── rl/                  # Reinforcement learning agent
+│   │   │   ├── environment.py   # Custom Gymnasium trading env
+│   │   │   ├── agent.py         # PPO agent with self-improvement
+│   │   │   ├── reward.py        # Asymmetric reward shaper
+│   │   │   └── trainer.py       # RL training orchestrator
+│   │   ├── analysis/            # Stock analysis engine
+│   │   │   ├── stock_analyzer.py # Master orchestrator
+│   │   │   └── report_generator.py # Bloomberg-style reports
+│   │   └── paper_trading/       # Paper trading system
+│   │       ├── paper_broker.py  # Simulated broker
+│   │       ├── trade_journal.py # CSV trade journal
+│   │       ├── zerodha_scaffold.py # Kite API scaffold
+│   │       └── performance_tracker.py # Portfolio analytics
 │   └── utils/                   # Shared utilities
 │       ├── data_loader.py
 │       └── visualizer.py
 │
+├── api/                         # FastAPI backend
+│   ├── main.py
+│   └── routers/
+│       ├── portfolio.py
+│       ├── quantum.py
+│       ├── options.py
+│       ├── backtest.py
+│       ├── ml.py                # ML training/prediction endpoints
+│       └── analyze.py           # Stock analysis endpoints
+│
 ├── tests/                       # Unit tests for core primitives
 ├── results/                     # Generated plots and comparison tables
 │   └── quantum/                 # QAOA optimization visualizations
+├── models/                      # Saved ML model weights
+├── data/                        # Market data + trade journals
+├── quantra-terminal.html        # Bloomberg-style terminal UI
 ├── requirements.txt
 ├── README.md
 └── main.py                      # Engine orchestrator / CLI entry point
@@ -176,13 +230,35 @@ Implemented a Quantum Approximate Optimization Algorithm (QAOA) using Qiskit 1.0
 
 ---
 
+### MONTH 3: FastAPI Backend & Historical Backtesting
+Implemented a resilient high-throughput FastAPI backend to serve the quant primitives as REST services, decoupled the analytical modules, and introduced an event-driven backtesting engine to evaluate static weight stability across major drawdown cycles.
+
+```text
+    ┌────────────────┐     ┌───────────────┐
+    │    TERMINAL    │ ──> │ FastAPI Layer │
+    │   (UI/Fetch)   │ <── │ (TTL Cached)  │
+    └────────────────┘     └──────┬────────┘
+                                  │
+    ┌────────────────┐     ┌──────▼────────┐
+    │  Backtesting   │ <── │ Core Analyzers│
+    │   Engine       │     │ (QAOA / BS)   │
+    └────────────────┘     └───────────────┘
+```
+
+#### New Features
+- **Event-Driven Backtest Engine:** Evaluates Markowitz and QAOA weights over dynamic historical sets, computing generic friction (slip + t-cost), rendering equity/drawdown curves, and assigning Brinson contribution scores.
+- **Bloomberg Terminal Live Mode:** The HTML terminal uses `await fetch()` to hydrate data, displaying `[API: LIVE]` if it establishes standard local WebSocket/CORS parity with FastAPI. Commands `BACKTEST <GO>` and `COMPARE <GO>` trigger real-time metrics.
+
+---
+
 ## Roadmap
 
-`classical-quant-engine` is **Layer 1** of the Quantra research series. The following modules are under active development:
+`classical-quant-engine` is **Layer 1** wrapper of the Quantra research series. The following modules are under active development:
 
 | Layer | Module | Status | Description |
 |---|---|---|---|
-| 1 | `classical-quant-engine` | ✅ Active | Monte Carlo, Black-Scholes, Markowitz optimizer |
+| 1 | `classical-quant-engine` | ✅ Active | Monte Carlo, Black-Scholes, Markowitz, Backtest |
+| 1.5 | `fastapi-quant-backend` | ✅ Active | REST API for analytics, caching, comparative QAOA tests |
 | 2 | `quantum-options-pricer` | 🔬 Research | Quantum Amplitude Estimation (QAE) for option pricing via Qiskit |
 | 3 | `vqe-portfolio-optimizer` | 🔬 Research | Variational Quantum Eigensolver for portfolio optimization on QUBO formulation |
 | 4 | `hybrid-execution-engine` | 📋 Planned | Classical-quantum hybrid execution with noise-aware circuit transpilation |

@@ -21,6 +21,7 @@ from src.utils.visualizer import (
     plot_convergence, plot_solution_distribution, plot_quantum_vs_classical
 )
 from src.quantum.benchmarker import QuantumClassicalBenchmark
+from src.backtest.engine import BacktestEngine
 
 # --- Configuration ---
 RESULTS_DIR = "results"
@@ -134,6 +135,52 @@ def run_quantum_demo():
     )
     print(f"Quantum plots saved to {QUANTUM_RESULTS_DIR}/")
 
+def run_backtest_demo():
+    print("\n--- Phase 4: Event-driven Historical Backtesting ---")
+    start_date = "2022-01-01"
+    end_date = "2024-01-01"
+    
+    # 1. Fetch classical weights
+    print("1. Computing Reference Target Weights (Classical Markowitz)...")
+    prices = fetch_nifty50_prices(TICKERS, start_date, end_date)
+    returns_df = get_returns(prices)
+    mu = returns_df.mean().values * 252
+    Sigma = returns_df.cov().values * 252
+    
+    from src.portfolio.markowitz import max_sharpe_portfolio
+    result = max_sharpe_portfolio(mu, Sigma, TICKERS)
+    weights = result["weights"]
+    
+    # 2. Run engine
+    print(f"2. Simulating Backtest Engine (Initial Capital = ₹1,000,000, Rebalance = Monthly)...")
+    engine = BacktestEngine(
+        tickers=TICKERS,
+        weights_dict=weights,
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=1000000.0,
+        transaction_cost_bps=10.0,
+        slippage_bps=5.0
+    )
+    bt_result = engine.run(rebalance_freq='monthly')
+    
+    # 3. Print Metrics
+    metrics = bt_result["metrics"]
+    print("\nBacktest Performance Metrics:")
+    print(f"  Total Return:           {metrics['total_return']*100:.2f}%")
+    print(f"  Annualized Return:      {metrics['annualized_return']*100:.2f}%")
+    print(f"  Annualized Volatility:  {metrics['annualized_volatility']*100:.2f}%")
+    print(f"  Sharpe Ratio:           {metrics['sharpe_ratio']:.2f}")
+    print(f"  Max Drawdown:           {metrics['max_drawdown']*100:.2f}%")
+    print(f"  Win Rate:               {metrics['win_rate']*100:.2f}%")
+    
+    # Attribution
+    print("\nTop 3 Performance Drivers:")
+    sorted_attr = sorted(bt_result["attribution"].items(), key=lambda x: x[1], reverse=True)
+    for ticker, contrib in sorted_attr[:3]:
+        print(f"  {ticker}: {contrib*100:.2f}% Return Contribution")
+
+
 def main():
     print("====================================================")
     print("          QUANTRA CLASSICAL QUANT ENGINE            ")
@@ -143,8 +190,11 @@ def main():
         run_options_demo()
         run_portfolio_demo()
         run_quantum_demo()
+        run_backtest_demo()
         print("\nPipeline completed successfully.")
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"\nPipeline failed: {e}")
 
 

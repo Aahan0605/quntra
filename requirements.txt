@@ -1,16 +1,43 @@
-numpy==1.26.4
-pandas==2.2.2
-yfinance==0.2.40
-cvxpy==1.5.3
-matplotlib==3.9.0
-pytest==8.2.2
-jupyter==1.0.0
-ipykernel==6.29.4
+numpy>=1.26.4
+pandas>=2.2.2
+yfinance>=0.2.40
+cvxpy>=1.5.0
+matplotlib>=3.9.0
+pytest>=8.2.2
+jupyter>=1.0.0
+ipykernel>=6.29.4
 
 # MONTH 2 — QUANTUM DEPENDENCIES
 # Qiskit 1.x has breaking changes from 0.x — use versions above exactly
 # Run: pip install -r requirements.txt --upgrade
-qiskit==1.0.2
-qiskit-algorithms==0.3.0
-qiskit-aer==0.14.2
-scipy==1.12.0
+qiskit>=1.0.2
+qiskit-algorithms>=0.3.0
+qiskit-aer>=0.14.2
+scipy>=1.12.0
+
+# MONTH 3 — BACKEND & BACKTESTING
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.4
+httpx>=0.27.0
+python-multipart>=0.0.9
+pandas-market-calendars>=4.3.2
+
+# MONTH 4 — ML/DL/RL INTELLIGENCE LAYER
+torch>=2.2.1
+xgboost>=2.0.3
+lightgbm>=4.3.0
+scikit-learn>=1.4.1
+stable-baselines3>=2.2.1
+gymnasium>=0.29.1
+ta>=0.11.0
+transformers>=4.38.2
+optuna>=3.5.2
+mlflow>=2.11.0
+beautifulsoup4>=4.12.3
+lxml>=5.1.0
+finnhub-python>=2.4.19
+shap>=0.45.0
+
+# BROKER INTEGRATION (scaffolded, not activated)
+kiteconnect>=5.0.1
