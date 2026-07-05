@@ -117,6 +117,17 @@ class TelegramAlerter:
     def error_alert(self, module: str, message: str) -> bool:
         return self.send(f"🚨 ERROR in {module}: {message}")
 
+    # Compatibility aliases (completion-loop prompt uses these names)
+    def send_message(self, text: str) -> bool:
+        return self.send(text)
+
+
+# Back-compat name used by the completion-loop prompt:
+#   from src.alerts.telegram_bot import TelegramBot
+#   TelegramBot().send_message("...")
+def TelegramBot() -> "TelegramAlerter":
+    return TelegramAlerter.from_config()
+
 
 class QuNtraTelegramBot:
     """Inbound command handler. Wire to a HermesCoordinator + guards."""

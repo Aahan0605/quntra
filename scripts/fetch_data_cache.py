@@ -60,16 +60,47 @@ def fetch_yf(ticker: str, start: date, end: date) -> pd.DataFrame | None:
         return None
 
 
+def upsert_to_db(ticker: str, df: pd.DataFrame) -> bool:
+    """Best-effort mirror of the cache into the price_data table."""
+    try:
+        from src.db import PriceData, get_session, init_db
+        init_db()
+        rows = df.to_dict("records")
+        with get_session() as s:
+            for r in rows:
+                s.merge(PriceData(
+                    ticker=ticker,
+                    date=pd.Timestamp(r["date"]).date(),
+                    open=r["open"], high=r["high"], low=r["low"],
+                    close=r["close"], volume=int(r["volume"]),
+                    adjusted_close=r["close"],
+                ))
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  (DB mirror skipped: {e})")
+        return False
+
+
 def main() -> int:
+    import time
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--years", type=int, default=4)
+    ap.add_argument("--years", type=int, default=5)
+    ap.add_argument("--start", type=str, default=None,
+                    help="YYYY-MM-DD (overrides --years)")
+    ap.add_argument("--sleep", type=float, default=2.0,
+                    help="seconds between tickers (NSE rate-limit courtesy)")
+    ap.add_argument("--no-db", action="store_true",
+                    help="skip mirroring into the price_data table")
     args = ap.parse_args()
 
     end = date.today()
-    start = end - timedelta(days=365 * args.years)
+    start = (date.fromisoformat(args.start) if args.start
+             else end - timedelta(days=365 * args.years))
     CACHE.mkdir(parents=True, exist_ok=True)
 
     ok, failed = 0, []
+    first_date, last_date = None, None
     for ticker in UNIVERSE:
         out = CACHE / f"{ticker.replace('&', '_')}.csv"
         print(f"{ticker} ...")
@@ -81,16 +112,28 @@ def main() -> int:
             print(f"  FAILED: {ticker}")
             continue
         df.to_csv(out, index=False)
+        if not args.no_db:
+            upsert_to_db(ticker, df)
         ok += 1
+        d0, d1 = str(df["date"].iloc[0])[:10], str(df["date"].iloc[-1])[:10]
+        first_date = min(first_date or d0, d0)
+        last_date = max(last_date or d1, d1)
         print(f"  saved {len(df)} rows -> {out.name}")
+        time.sleep(args.sleep)
 
     bench = fetch_yf("^NSEI", start, end)
     if bench is not None:
         bench.to_csv(CACHE / "NIFTY50_BENCH.csv", index=False)
         print(f"benchmark ^NSEI: {len(bench)} rows")
 
-    print(f"\n{ok}/{len(UNIVERSE)} tickers cached. Failed: {failed or 'none'}")
-    return 0 if ok == len(UNIVERSE) else 1
+    print(f"\nDATA FETCH COMPLETE: {ok}/{len(UNIVERSE)} tickers, "
+          f"date range {first_date} to {last_date}")
+    if failed:
+        print("Failed:", failed)
+    if ok < 23:
+        print(f"GATE FAIL: need >= 23/25 tickers, got {ok}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

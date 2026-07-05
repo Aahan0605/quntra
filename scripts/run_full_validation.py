@@ -118,6 +118,14 @@ def synthetic_panel() -> pd.DataFrame:
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verbose", action="store_true",
+                    help="print cost drag and turnover diagnostics")
+    ap.add_argument("--save-tearsheet", action="store_true",
+                    help="save equity/drawdown PNG next to the JSON")
+    args = ap.parse_args()
+
     real_data = cache_available(UNIVERSE)
     if real_data:
         panel = load_close_panel(UNIVERSE)
@@ -129,6 +137,37 @@ def main() -> int:
     port_returns, annual_turnover = walk_forward(panel)
     m = BacktestMetrics.calculate_metrics(port_returns)
     m["annual_turnover"] = annual_turnover
+
+    if args.verbose:
+        cost = CostModel.from_config()
+        friction = cost.one_way_cost_rate(delivery=True) + cost.slippage_rate()
+        annual_cost_drag = 2.0 * annual_turnover * friction
+        print("--- diagnostics ---")
+        print(f"one-way friction/trade : {friction:.4%}")
+        print(f"annual turnover        : {annual_turnover:.1%} one-way")
+        print(f"annual cost drag       : {annual_cost_drag:.3%} of NAV")
+        print(f"gross ann. return est. : {m['annualized_return'] + annual_cost_drag:+.2%}")
+        print(f"net ann. return        : {m['annualized_return']:+.2%}")
+
+    if args.save_tearsheet:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            equity = (1 + port_returns).cumprod()
+            dd = equity / equity.cummax() - 1
+            fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+            axes[0].plot(equity.index, equity.values)
+            axes[0].set_title("QuNtra validation — equity curve (net of costs)")
+            axes[1].fill_between(dd.index, dd.values, 0, alpha=0.5)
+            axes[1].set_title("Drawdown")
+            fig.tight_layout()
+            png = OUT.parent / "validation_tearsheet.png"
+            OUT.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(png, dpi=120)
+            print(f"Tearsheet -> {png.relative_to(ROOT)}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Tearsheet skipped: {e}")
 
     checks = {
         "sharpe_ratio": m["sharpe_ratio"] > TARGETS["sharpe_ratio"],

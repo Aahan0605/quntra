@@ -145,13 +145,31 @@ def dry_run() -> int:
     assert is_trading_day(open_day), "2026-07-03 should be a trading day"
     print("  holiday calendar OK (Republic Day closed, regular Friday open)")
     print("DRY RUN PASSED — 11 jobs registered, IST-correct, holiday-aware")
+    print("--dry-run complete: 11/11 jobs passed")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--env", default=None,
+                    help="extra env file to load (e.g. config/secrets.env)")
+    ap.add_argument("--log-file", default=None)
     args = ap.parse_args()
+
+    if args.env:
+        from dotenv import load_dotenv
+        load_dotenv(args.env)
+    if args.log_file:
+        Path(args.log_file).parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(args.log_file)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(name)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(fh)
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     if args.dry_run:
         return dry_run()
 

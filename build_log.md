@@ -79,3 +79,21 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 3. RUNBOOK step 4: run_full_validation -> all 3 targets PASS on real data
 4. RUNBOOK steps 5-7: Postgres, Telegram secrets, start scheduler
 5. 40 trading days of paper -> gate -> only then discuss live capital
+
+## Completion-loop alignment session (2026-07-05, later)
+
+- [DONE] Re-verified sandbox blockers: Docker absent; NSE/Yahoo/Telegram all
+  blocked by proxy -> Steps 1-8 must run on the local machine.
+- [DONE] Entry points aligned with the completion prompt:
+  train_clean_models CLI args (--data-dir/--output-dir/--oos-threshold/--verbose),
+  scheduler --env/--log-file/--verbose + "11/11 jobs passed" output,
+  validation --verbose (cost/turnover diagnostics) + --save-tearsheet,
+  TelegramBot/send_message compat aliases, MAX_TRADES_PER_DAY=3,
+  fetch_data_cache: 5y default, 2s rate-limit sleep, price_data DB mirror,
+  23/25 gate + "DATA FETCH COMPLETE" summary.
+- [DONE] New: scripts/check_data_quality.py, scripts/paper_performance_report.py
+  (40-day gate report), scripts/complete_local_setup.py (one-command Steps 0-8
+  orchestrator with resume via --from N; hard-stops at failed gates;
+  SQLite fallback when Docker missing; Telegram soft-gate with instructions).
+- [DONE] 128 tests still passing; dry-run prints 11/11.
+- HANDOFF: run on the Mac ->  python3 scripts/complete_local_setup.py

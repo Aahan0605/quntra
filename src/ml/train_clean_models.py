@@ -130,6 +130,26 @@ def _runtime_versions() -> dict:
 
 
 def main() -> int:
+    import argparse
+    global MODEL_DIR, REJECT_DIR, OOS_GATE
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-dir", default=None,
+                    help="cache dir (default data/cache)")
+    ap.add_argument("--output-dir", default=None,
+                    help="model output dir (default data/models)")
+    ap.add_argument("--oos-threshold", type=float, default=OOS_GATE)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    if args.output_dir:
+        MODEL_DIR = Path(args.output_dir)
+        REJECT_DIR = MODEL_DIR / "rejected"
+    OOS_GATE = args.oos_threshold
+    if args.data_dir:
+        from src.utils import cache_loader
+        cache_loader.CACHE = Path(args.data_dir)
+
     results = []
     for t in UNIVERSE:
         try:
