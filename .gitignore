@@ -150,3 +150,10 @@ data/
 results/*.png
 results/quantum/*.png
 !results/quantum/benchmark_comparison.png
+
+# QuNtra — never commit these
+config/secrets.env
+data/quntra.db
+data/cache/
+data/models/
+mlruns/

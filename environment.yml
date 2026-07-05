@@ -1,0 +1,25 @@
+# QuNtra pinned conda environment — mirror of requirements-pinned.txt
+# Create: conda env create -f environment.yml && conda activate quntra
+name: quntra
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy=2.2.6
+  - pandas=2.3.3
+  - scipy=1.15.3
+  - scikit-learn=1.7.2
+  - sqlalchemy=2.0.51
+  - alembic=1.18.5
+  - apscheduler=3.11.3
+  - pytz=2026.2
+  - python-dotenv=1.2.2
+  - pytest=8.2.2
+  - pip
+  - pip:
+      - xgboost==3.2.0
+      - yfinance==1.5.1
+      - jugaad-data==0.28
+      - pandas-market-calendars==5.4.0
+      - kiteconnect==5.0.1
+      - python-telegram-bot==22.5

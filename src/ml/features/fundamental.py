@@ -424,7 +424,9 @@ class FundamentalFeatures:
             if isinstance(v, bool):
                 numeric_features[k] = int(v)
             elif isinstance(v, (int, float)):
-                numeric_features[k] = float(v) if not np.isnan(v) if isinstance(v, float) else v
+                if isinstance(v, float) and np.isnan(v):
+                    continue  # drop NaN features
+                numeric_features[k] = float(v)
             # Skip string features for ML (kept separately for display)
 
         # Re-add string features for display purposes

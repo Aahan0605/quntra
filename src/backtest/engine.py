@@ -1,97 +1,144 @@
-import pandas as pd
+"""
+QuNtra backtest engine.
+
+v2 (Phase 0 fix): realistic friction and rebalancing.
+  * Costs load from config/costs.env via src.utils.costs.CostModel —
+    no more hardcoded "10% average turnover" approximation.
+  * Weights drift with returns; a Rebalancer (weekly + 3% drift
+    threshold + 20% turnover cap) decides actual trades, and costs are
+    charged on actual traded notional.
+  * Prices can be injected (offline/cached runs) instead of fetched.
+"""
+
 import numpy as np
+import pandas as pd
 
 from src.utils.data_loader import fetch_nifty50_prices, get_returns
+from src.utils.costs import CostModel
+from src.portfolio.rebalancer import Rebalancer
 from src.backtest.metrics import BacktestMetrics
 from src.backtest.attribution import PerformanceAttribution
 
+
 class BacktestEngine:
-    """Historical backtester evaluating constant-weight strategies."""
-    
-    def __init__(self, tickers: list[str], weights_dict: dict, start_date: str, end_date: str, 
-                 initial_capital: float = 1000000.0, transaction_cost_bps: float = 10.0, slippage_bps: float = 5.0):
+    """Historical backtester with drift-aware rebalancing and real costs."""
+
+    def __init__(
+        self,
+        tickers: list[str],
+        weights_dict: dict,
+        start_date: str,
+        end_date: str,
+        initial_capital: float = 1_000_000.0,
+        transaction_cost_bps: float | None = None,   # legacy override
+        slippage_bps: float | None = None,           # legacy override
+        cost_model: CostModel | None = None,
+        rebalancer: Rebalancer | None = None,
+    ):
         self.tickers = tickers
         self.weights = {k: v for k, v in weights_dict.items() if v > 0}
         self.start_date = start_date
         self.end_date = end_date
         self.initial_capital = initial_capital
-        
-        # Costs
-        self.t_cost_rate = transaction_cost_bps / 10000.0
-        self.slippage_rate = slippage_bps / 10000.0
-        self.total_cost_rate = self.t_cost_rate + self.slippage_rate
-        
+
+        self.cost_model = cost_model or CostModel.from_config()
+        # One-way friction per unit traded notional (fees + slippage)
+        if transaction_cost_bps is not None:
+            self._one_way_fee = transaction_cost_bps / 10_000.0
+        else:
+            self._one_way_fee = self.cost_model.one_way_cost_rate(delivery=True)
+        if slippage_bps is not None:
+            self._one_way_slip = slippage_bps / 10_000.0
+        else:
+            self._one_way_slip = self.cost_model.slippage_rate()
+        self._one_way_friction = self._one_way_fee + self._one_way_slip
+
+        self.rebalancer = rebalancer  # None -> constructed in run()
+
         # Results
         self.metrics = None
         self.equity_curve = None
         self.drawdown_curve = None
         self.attribution = None
-        
-    def run(self, rebalance_freq: str = 'monthly') -> dict:
+        self.annual_turnover = None
+
+    # ------------------------------------------------------------------ #
+
+    def run(
+        self,
+        rebalance_freq: str = "weekly",
+        prices: pd.DataFrame | None = None,
+    ) -> dict:
         """
-        Run the backtest loop.
-        Frequency strings: 'daily', 'weekly', 'monthly', 'quarterly'
+        Run the backtest. `prices` may be injected (cached/offline data);
+        otherwise fetched via the data loader.
         """
-        # Fetch adjusted prices
-        prices = fetch_nifty50_prices(self.tickers, self.start_date, self.end_date)
+        if prices is None:
+            prices = fetch_nifty50_prices(self.tickers, self.start_date, self.end_date)
         if prices.empty:
             raise ValueError("No price data retrieved for backtest.")
-            
+        prices = prices[[c for c in prices.columns if c in self.weights or c in self.tickers]]
+
         returns = get_returns(prices)
-        
-        # Identify rebalance days
-        if rebalance_freq == 'monthly':
-            rebalance_dates = returns.groupby([returns.index.year, returns.index.month]).apply(lambda x: x.index[0])
-        elif rebalance_freq == 'weekly':
-            rebalance_dates = returns.groupby([returns.index.year, returns.index.isocalendar().week]).apply(lambda x: x.index[0])
-        elif rebalance_freq == 'quarterly':
-            rebalance_dates = returns.groupby([returns.index.year, returns.index.quarter]).apply(lambda x: x.index[0])
-        else:
-            # daily
-            rebalance_dates = returns.index
-            
-        # Drop the hierarchical index created by groupby and sort
-        rebalance_dates = sorted(list(rebalance_dates))
-            
-        # Simulate portfolio loop
-        portfolio_val = self.initial_capital
-        equity_series = pd.Series(index=returns.index, dtype=float)
-        
-        # Initialize target allocations
-        current_allocations = {t: 0.0 for t in self.tickers}
-        weights_array = np.array([self.weights.get(t, 0.0) for t in prices.columns])
-        
-        # Simplified vectorised backtest assuming we hold the weights matrix constant, 
-        # and pay friction on rebalance days.
+        cols = list(returns.columns)
+
+        target = np.array([self.weights.get(t, 0.0) for t in cols], dtype=float)
+        if target.sum() <= 0:
+            raise ValueError("Target weights sum to zero for available tickers.")
+        target = target / target.sum()
+        target_map = dict(zip(cols, target))
+
+        rebalancer = self.rebalancer or Rebalancer(frequency=rebalance_freq)
+        rebalancer._last_rebalance = None
+
+        current = target.copy()
         port_returns = pd.Series(0.0, index=returns.index)
-        
-        # First day setup: we enter the market and pay total cost
-        port_returns.iloc[0] = (returns.iloc[0] @ weights_array) - self.total_cost_rate
-        
+        total_turnover = 0.0
+
+        # Day 0: enter the market — pay one-way friction on 100% notional
+        port_returns.iloc[0] = float(returns.iloc[0] @ current) - self._one_way_friction
+
         for i in range(1, len(returns)):
-            date = returns.index[i]
-            # Standard return before rebalancing
-            daily_ret = returns.iloc[i] @ weights_array
-            
-            if date in rebalance_dates:
-                # Pay turnover cost - assuming turnover is roughly proportion of portfolio (simplified approximation)
-                daily_ret -= self.total_cost_rate * 0.10 # Assuming 10% average turnover turnover 
-                
+            row = returns.iloc[i]
+            daily_ret = float(row @ current)
+
+            # Drift weights with today's returns
+            growth = current * (1.0 + row.values)
+            denom = growth.sum()
+            if denom > 0:
+                current = growth / denom
+
+            ts = returns.index[i]
+            decision = rebalancer.compute_trades(
+                dict(zip(cols, current)), target_map,
+                ts.date() if hasattr(ts, "date") else ts,
+            )
+            if decision.should_rebalance:
+                traded_notional = 2.0 * decision.one_way_turnover  # buys + sells
+                daily_ret -= traded_notional * self._one_way_friction
+                total_turnover += decision.one_way_turnover
+                for j, t in enumerate(cols):
+                    current[j] += decision.trades.get(t, 0.0)
+                current = np.clip(current, 0, None)
+                s = current.sum()
+                if s > 0:
+                    current = current / s
+
             port_returns.iloc[i] = daily_ret
-            
-        # Subtract generic expense ratio (reduction in return continuously)
-        # Assuming 0.5% annualized expense ratio / 252
-        expense_ratio_daily = 0.005 / 252.0
-        port_returns -= expense_ratio_daily
-            
+
+        years = len(returns) / 252.0
+        self.annual_turnover = total_turnover / years if years > 0 else 0.0
+
         self.metrics = BacktestMetrics.calculate_metrics(port_returns)
+        self.metrics["annual_turnover"] = float(self.annual_turnover)
+        self.metrics["one_way_friction_rate"] = float(self._one_way_friction)
         self.drawdown_curve = BacktestMetrics.get_drawdown_curve(port_returns)
         self.equity_curve = self.initial_capital * (1 + port_returns).cumprod()
         self.attribution = PerformanceAttribution.calculate_attribution(self.weights, returns)
-        
+
         return {
             "metrics": self.metrics,
             "equity_curve": {k.strftime("%Y-%m-%d"): v for k, v in self.equity_curve.items()},
             "drawdown_curve": {k.strftime("%Y-%m-%d"): round(v, 4) for k, v in self.drawdown_curve.items()},
-            "attribution": self.attribution
+            "attribution": self.attribution,
         }

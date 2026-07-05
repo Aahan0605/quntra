@@ -16,6 +16,7 @@ class BacktestMetrics:
                 "annualized_volatility": 0.0,
                 "sharpe_ratio": 0.0,
                 "sortino_ratio": 0.0,
+                "calmar_ratio": 0.0,
                 "max_drawdown": 0.0,
                 "win_rate": 0.0
             }
@@ -44,13 +45,17 @@ class BacktestMetrics:
         
         # Win Rate
         win_rate = len(returns[returns > 0]) / len(returns)
-        
+
+        # Calmar Ratio (annualized return over |max drawdown|)
+        calmar = ann_ret / abs(max_dd) if max_dd < 0 else 0.0
+
         return {
             "total_return": float(total_ret),
             "annualized_return": float(ann_ret),
             "annualized_volatility": float(ann_vol),
             "sharpe_ratio": float(sharpe),
             "sortino_ratio": float(sortino),
+            "calmar_ratio": float(calmar),
             "max_drawdown": float(max_dd),
             "win_rate": float(win_rate)
         }

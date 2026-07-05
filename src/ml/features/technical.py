@@ -195,12 +195,13 @@ class TechnicalFeatures:
         self.df['adx_trending'] = (self.df['adx'] > 25).astype(int)
 
     def _manual_adx(self, period=14):
-        """Fallback ADX computation without ta library."""
+        """Fallback ADX — Wilder's smoothing throughout, matching
+        ta.trend.ADXIndicator (verified in tests/test_indicator_equivalence.py)."""
         high, low, close = self.df['high'], self.df['low'], self.df['close']
-        plus_dm = high.diff().clip(lower=0)
-        minus_dm = (-low.diff()).clip(lower=0)
-        plus_dm[plus_dm < minus_dm] = 0
-        minus_dm[minus_dm < plus_dm] = 0
+        up = high.diff()
+        down = -low.diff()
+        plus_dm = up.where((up > down) & (up > 0), 0.0)
+        minus_dm = down.where((down > up) & (down > 0), 0.0)
 
         tr = pd.concat([
             high - low,
@@ -208,11 +209,14 @@ class TechnicalFeatures:
             (low - close.shift(1)).abs()
         ], axis=1).max(axis=1)
 
-        atr = tr.rolling(period, min_periods=1).mean()
-        plus_di = 100 * (plus_dm.rolling(period, min_periods=1).mean() / (atr + 1e-10))
-        minus_di = 100 * (minus_dm.rolling(period, min_periods=1).mean() / (atr + 1e-10))
+        alpha = 1.0 / period
+        atr = tr.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+                         / (atr + 1e-10))
+        minus_di = 100 * (minus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+                          / (atr + 1e-10))
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
-        self.df['adx'] = dx.rolling(period, min_periods=1).mean()
+        self.df['adx'] = dx.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
         self.df['adx_pos_di'] = plus_di
         self.df['adx_neg_di'] = minus_di
 
@@ -330,12 +334,13 @@ class TechnicalFeatures:
 
     @staticmethod
     def _manual_rsi(series, period):
-        """Fallback RSI computation."""
+        """Fallback RSI — Wilder's smoothing, numerically equivalent to
+        ta.momentum.RSIIndicator (verified in tests/test_indicator_equivalence.py)."""
         delta = series.diff()
         gain = delta.clip(lower=0)
         loss = (-delta.clip(upper=0))
-        avg_gain = gain.rolling(window=period, min_periods=1).mean()
-        avg_loss = loss.rolling(window=period, min_periods=1).mean()
+        avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
         rs = avg_gain / (avg_loss + 1e-10)
         return 100 - (100 / (1 + rs))
 

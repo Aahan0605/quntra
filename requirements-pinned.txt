@@ -1,0 +1,33 @@
+# QuNtra pinned runtime — verified working combination (2026-07-05)
+# All model pickles MUST be trained and loaded under these exact versions.
+# Install: pip install -r requirements-pinned.txt
+
+# Core numerics (pickle-compatibility critical)
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+xgboost==3.2.0            # via xgboost-cpu wheel on constrained hosts: pip install xgboost-cpu==3.2.0
+
+# Data
+yfinance==1.5.1           # global indices ONLY — not for Indian equity
+jugaad-data==0.28         # NSE/BSE/RBI historical + live
+pandas-market-calendars==5.4.0
+
+# Infrastructure
+SQLAlchemy==2.0.51
+alembic==1.18.5
+APScheduler==3.11.3
+pytz==2026.2
+python-dotenv==1.2.2
+
+# Broker + alerts
+kiteconnect==5.0.1
+ta==0.11.0
+pyfolio-reloaded==0.9.9
+mlflow-skinny
+Bharat-SM-Data==3.0.0  # 4.x requires Python 3.12+
+python-telegram-bot==22.5
+
+# Testing
+pytest==8.2.2
