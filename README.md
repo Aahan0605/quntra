@@ -1,5 +1,7 @@
 # classical-quant-engine
 
+> **Build status (done vs pending): see [STATUS.md](STATUS.md)** · Setup: [RUNBOOK.md](RUNBOOK.md) · History: [build_log.md](build_log.md)
+
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Active%20Research-orange)
