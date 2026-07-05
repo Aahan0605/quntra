@@ -225,12 +225,17 @@ def step6_secrets() -> bool:
 
 
 def step7_dryrun() -> bool:
-    banner(7, "End-to-end dry-run")
+    banner(7, "End-to-end dry-run + smoke test")
     r = run("python3 scripts/scheduler.py --dry-run", timeout=300)
     if r.returncode != 0:
         fail("Dry-run failed — read the traceback above, fix, rerun --from 7")
         return False
     ok("11/11 jobs passed")
+    r = run("python3 scripts/smoke_test.py", timeout=300)
+    if r.returncode != 0:
+        fail("Smoke test failed — fix the integration issue, rerun --from 7")
+        return False
+    ok("Smoke test passed — all 5 components integrate")
     return True
 
 

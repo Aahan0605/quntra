@@ -104,7 +104,11 @@ class QuNtraBrain:
             ).scalar_one_or_none()
             return float(row.credibility_weight) if row else 1.0
 
-    def update_agent_credibility(self, agent_name: str, correct: bool) -> float:
+    def update_agent_credibility(self, agent_name: str, correct: bool | None = None,
+                                 was_correct: bool | None = None) -> float:
+        # `was_correct` accepted as an alias (completion-loop prompt name)
+        if correct is None:
+            correct = bool(was_correct)
         with self._session() as s:
             row = s.execute(
                 select(AgentCredibility).where(

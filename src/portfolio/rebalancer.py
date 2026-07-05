@@ -136,3 +136,7 @@ class Rebalancer:
 
         years = len(returns) / 252.0
         return total_turnover / years if years > 0 else 0.0
+
+
+# Alias used by the completion-loop prompts (weekly is the default policy)
+WeeklyRebalancer = Rebalancer

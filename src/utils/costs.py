@@ -84,3 +84,10 @@ class CostModel:
 
     def slippage_rate(self) -> float:
         return self.slippage_pct_per_side / 100.0
+
+    # Alias used by the completion-loop prompts
+    from_env = from_config
+
+
+# Alias used by the completion-loop prompts
+ICICICostModel = CostModel

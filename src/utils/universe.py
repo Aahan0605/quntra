@@ -39,6 +39,9 @@ UNIVERSE: list[str] = [
 
 EXPECTED_COUNT = 25
 
+# Alias used by the completion-loop prompts
+VALIDATED_TICKERS = UNIVERSE
+
 
 def validate_universe(universe: list[str] | None = None) -> tuple[bool, str]:
     """Return (ok, message). Checks count, uniqueness, and .NS suffix."""

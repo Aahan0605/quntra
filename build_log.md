@@ -97,3 +97,22 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   SQLite fallback when Docker missing; Telegram soft-gate with instructions).
 - [DONE] 128 tests still passing; dry-run prints 11/11.
 - HANDOFF: run on the Mac ->  python3 scripts/complete_local_setup.py
+
+## Completion-loop session R1-R9 (2026-07-05, evening)
+
+- [DONE] R1: audited state. Compat aliases present (VALIDATED_TICKERS,
+  WeeklyRebalancer, ICICICostModel.from_env, brain was_correct).
+  data/cache + data/models still EMPTY -> R2-R4 gates require the Mac.
+- [DONE] R8: scripts/smoke_test.py verified — ALL CHECKS PASSED offline
+  (Brain store/recall, credibility 1.05, paper fill, loss counter,
+  Hermes state). Re-runs automatically inside complete_local_setup step 7.
+- [DONE] R9: scripts/paper_trading_status.py verified (day count, Sharpe,
+  DD, credibility bars, gate checklist).
+- [DONE] R6 (script): scripts/verify_connections.py built + verified
+  (Postgres/Telegram/Kite/NSE, exits 1 only if a CONFIGURED service fails).
+- [DONE] 128 tests still passing after all external modifications.
+- BLOCKER (unchanged): sandbox has no Docker and NSE/Yahoo/Telegram are
+  proxy-blocked. R2 (data), R3 (training), R4 (validation), R5 (Postgres),
+  R6 (real secrets), R7 (scheduler start) MUST run on the local machine:
+      python3 scripts/complete_local_setup.py
+- RULE 8 REMINDER: the 40 trading days cannot be shortcut.
