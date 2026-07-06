@@ -19,7 +19,7 @@ paper -> live with one config change.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from src.db import SystemState, get_session
@@ -227,11 +227,15 @@ class HermesCoordinator:
 
         # 4. Execute passing signals
         if can_trade:
+            regime = (self.get_system_state("regime") or {}).get("state")
             for sig in signals:
                 self.brain.remember_signal({**sig, "executed": True})
                 trade = self.trader.place_order(
                     ticker=sig["ticker"], direction=sig["direction"],
                     qty=sig.get("qty", 1), signal_hash=sig.get("signal_hash"),
+                    score=sig.get("score"), regime=sig.get("regime", regime),
+                    agent_votes=sig.get("agent_votes"),
+                    reasoning=sig.get("reasoning"),
                 )
                 actions["executed"].append(trade)
         else:
@@ -353,12 +357,87 @@ class HermesCoordinator:
         from src.reporting import MonthlyLetter
         return MonthlyLetter(self.db_url, telegram=self.telegram).generate()
 
+    def send_weekly_paper_recap(self) -> str:
+        """Friday 6 PM IST — where the 40-day paper gate stands."""
+        from src.reporting import metrics as M
+        now = datetime.now(timezone.utc)
+        week = M.trades_between(self.db_url, now - timedelta(days=7), now)
+        stats = M.pnl_stats(week)
+        series = M.daily_pnl_series(self.db_url, days=120)
+        days_done = len(series)
+        sharpe = M.rolling_sharpe(self.db_url)
+        dd = M.max_drawdown_from_pnl(self.db_url, days=120)
+        sharpe_pass = sharpe is not None and sharpe > 1.0
+        dd_pass = dd > -0.15
+
+        lines = [
+            "📅 Weekly Paper Trading Recap",
+            f"Trades this week: {stats['n_trades']}",
+            f"Week P&L: ₹{stats['net_pnl']:+,.2f}",
+            f"Paper gate: day {days_done}/40",
+        ]
+        if days_done >= 40 and sharpe_pass and dd_pass:
+            lines += ["", "🎉 PAPER GATE PASSED!",
+                      "Ready for live capital deployment.",
+                      "Next step: /start_live"]
+        else:
+            lines += [f"Days remaining: {max(0, 40 - days_done)}",
+                      "Stay patient. Capital preservation first."]
+        msg = "\n".join(lines)
+        if self.telegram is not None:
+            self.telegram.send(msg)
+        return msg
+
     # ------------------------------------------------------------------ #
     # Scheduler hook points (thin wrappers so cron jobs stay 1-liners)
 
     def arm_system(self):
+        """08:45 IST — arm the OMS and push the morning briefing."""
         self.set_system_state("oms", {"enabled": True,
                                       "armed_at": datetime.now(IST).isoformat()})
+        try:
+            self.send_morning_briefing()
+        except Exception:  # noqa: BLE001 — briefing must never block arming
+            logger.exception("morning briefing failed")
+
+    def send_morning_briefing(self) -> str:
+        """Everything QuNtra found overnight, pushed to the operator."""
+        pre = self.get_system_state("premarket") or {}
+        regime = (self.get_system_state("regime") or {}).get("state",
+                                                             "UNKNOWN")
+        watchlist = pre.get("watchlist") or []
+        blackout = pre.get("earnings_blackout") or []
+        draft = (self.get_system_state("premarket_draft") or {}).get(
+            "report", "")
+
+        lines = [
+            f"☀️ QuNtra Morning Briefing — "
+            f"{datetime.now(IST).strftime('%d %b %Y')}",
+            f"🎯 Regime: {regime}",
+            f"🌍 Macro: {pre.get('macro_bias', 'UNKNOWN')}",
+        ]
+        if watchlist:
+            shown = ", ".join(watchlist[:5])
+            extra = f" +{len(watchlist) - 5} more" if len(watchlist) > 5 else ""
+            lines.append(f"📋 Watchlist ({len(watchlist)}): {shown}{extra}")
+        else:
+            lines.append("📋 Watchlist: empty — no tickers scored ≥ 9/12")
+        if blackout:
+            lines.append(f"📅 Earnings today: {', '.join(blackout)} "
+                         f"(will NOT be traded)")
+        risks = [line.strip("• ").strip()
+                 for line in draft.splitlines()
+                 if line.strip().startswith("•")][:3]
+        if risks:
+            lines.append("⚠️ Top risks:")
+            lines += [f"  • {r}" for r in risks]
+        lines.append("Max trades today: 3 · Capital: ₹25,000 · Mode: PAPER")
+        lines.append("/watchlist for the full list · /research for the "
+                     "full report")
+        msg = "\n".join(lines)
+        if self.telegram is not None:
+            self.telegram.send(msg)
+        return msg
 
     def observe_market_open(self):
         self.set_system_state("market_open_observed",
@@ -373,9 +452,45 @@ class HermesCoordinator:
         self.set_system_state("oms", {"enabled": False,
                                       "reason": "close management"})
 
-    def send_eod_report(self):
+    def send_eod_report(self) -> str:
+        """17:00 IST — compact EOD push; /daily_report has the full story."""
+        try:
+            from src.reporting import metrics as M
+            trades = self.brain.get_todays_trades()
+            closed = [t for t in trades if t.get("pnl") is not None]
+            day_pnl = sum(t["pnl"] for t in closed)
+            winners = sum(1 for t in closed if t["pnl"] > 0)
+            losers = sum(1 for t in closed if t["pnl"] <= 0)
+            sharpe = M.rolling_sharpe(self.db_url)
+            dd = M.max_drawdown_from_pnl(self.db_url)
+            series = M.daily_pnl_series(self.db_url, days=120)
+            days_done = len(series)
+
+            emoji = "✅" if day_pnl > 0 else ("🔴" if day_pnl < 0 else "⬜")
+            lines = [
+                f"{emoji} QuNtra EOD Summary — "
+                f"{datetime.now(IST).strftime('%d %b %Y')}",
+                (f"Today: {len(trades)} trades ({winners}W/{losers}L) · "
+                 f"P&L ₹{day_pnl:+,.2f}" if trades
+                 else "No trades today."),
+                "",
+                "📊 Rolling 30d:",
+                f"  Sharpe: "
+                + (f"{sharpe:.3f}" if sharpe is not None else "n/a"),
+                f"  Max DD: {dd:+.2%}",
+                "",
+                f"🎯 Paper gate: day {days_done}/40 · "
+                f"Sharpe {'✓' if sharpe is not None and sharpe > 1 else '⏳'} · "
+                f"DD {'✓' if dd > -0.15 else '✗'}",
+                "/daily_report for the full breakdown",
+            ]
+            msg = "\n".join(lines)
+        except Exception:  # noqa: BLE001 — fall back to the simple summary
+            logger.exception("compact EOD failed — sending basic summary")
+            msg = self._build_eod_summary()
         if self.telegram is not None:
-            self.telegram.send(self._build_eod_summary())
+            self.telegram.send(msg)
+        return msg
 
     def start_overnight_research(self):
         self.set_system_state("overnight_research",

@@ -121,7 +121,9 @@ class KiteOMS:
 
     def place_order(self, ticker: str, direction: str, qty: int,
                     signal_hash: str | None = None,
-                    price: float | None = None) -> dict:
+                    price: float | None = None, **meta) -> dict:
+        # **meta (score/regime/reasoning/agent_votes) — interface parity
+        # with PaperTrader; carried by Hermes for notifications/journal
         self._roll_day()
         signal_hash = signal_hash or uuid.uuid4().hex
 

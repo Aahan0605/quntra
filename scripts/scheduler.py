@@ -79,7 +79,7 @@ def build_hermes() -> HermesCoordinator:
     paper = os.environ.get("PAPER_TRADE", "true").lower() != "false"
     if paper:
         from src.execution.paper_trader import PaperTrader
-        trader = PaperTrader(brain=brain, fetcher=fetcher)
+        trader = PaperTrader(brain=brain, fetcher=fetcher, telegram=telegram)
     else:
         from src.execution.kite_oms import KiteOMS
         trader = KiteOMS(brain=brain)
@@ -90,7 +90,7 @@ def build_hermes() -> HermesCoordinator:
 
     return HermesCoordinator(
         brain=brain, trader=trader, fetcher=fetcher, telegram=telegram,
-        circuit_breaker=DrawdownCircuitBreaker(),
+        circuit_breaker=DrawdownCircuitBreaker(telegram=telegram),
         loss_guard=ConsecutiveLossGuard(brain=brain, telegram=telegram,
                                         oms=trader),
         council=council,
@@ -116,6 +116,8 @@ def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
          dict(day_of_week="sun", hour=20, minute=0)),
         ("monthly_letter", hermes.generate_monthly_investment_letter,
          dict(day=1, hour=9, minute=0)),
+        ("weekly_paper_recap", hermes.send_weekly_paper_recap,
+         dict(day_of_week="fri", hour=18, minute=0)),
     ]
     market_hour_jobs = {"pre_market", "arm_system", "observe_open",
                         "start_session", "market_loop", "close_mgmt",
@@ -137,7 +139,7 @@ def dry_run() -> int:
     scheduler = BlockingScheduler(timezone=IST)
     hermes = _Stub()
     ids = register_jobs(scheduler, hermes)
-    assert len(ids) == 13, f"expected 13 jobs, got {len(ids)}"
+    assert len(ids) == 14, f"expected 14 jobs, got {len(ids)}"
     for job in scheduler.get_jobs():
         nxt = job.trigger.get_next_fire_time(None, datetime.now(IST))
         assert nxt is not None, f"job {job.id} would never fire"
@@ -153,8 +155,8 @@ def dry_run() -> int:
     assert not is_trading_day(closed), "Republic Day should be closed"
     assert is_trading_day(open_day), "2026-07-03 should be a trading day"
     print("  holiday calendar OK (Republic Day closed, regular Friday open)")
-    print("DRY RUN PASSED — 13 jobs registered, IST-correct, holiday-aware")
-    print("--dry-run complete: 13/13 jobs passed")
+    print("DRY RUN PASSED — 14 jobs registered, IST-correct, holiday-aware")
+    print("--dry-run complete: 14/14 jobs passed")
     return 0
 
 
@@ -185,6 +187,23 @@ def main() -> int:
     hermes = build_hermes()
     scheduler = BlockingScheduler(timezone=IST)
     register_jobs(scheduler, hermes)
+
+    # /health reads system_state["last_job_run"] to prove the scheduler
+    # is not just alive but actually firing jobs.
+    from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+
+    def _record_job(event):
+        try:
+            hermes.set_system_state("last_job_run", {
+                "name": event.job_id,
+                "at": datetime.now(IST).isoformat(),
+                "error": str(event.exception) if getattr(
+                    event, "exception", None) else None,
+            })
+        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
+            logger.exception("could not record last_job_run")
+
+    scheduler.add_listener(_record_job, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
     logger.info("QuNtra scheduler starting — %d jobs, timezone IST",
                 len(scheduler.get_jobs()))
     try:

@@ -46,11 +46,22 @@ class ConsecutiveLossGuard:
         self.halted = True
         if self.oms is not None:
             self.oms.disable()
-        if self.telegram is not None:
-            self.telegram.send(
-                f"⚠️ KILL SWITCH: {self.counter} consecutive losses. OMS halted."
-            )
         report = self.generate_mistake_report()
+        if self.telegram is not None:
+            losses = ", ".join(
+                f"{l.get('ticker', '?')} ₹{l.get('pnl', 0):+,.0f}"
+                for l in self.recent_losses) or "n/a"
+            analysis = (report.get("summary")
+                        or str(report))[:200] if report else "pending"
+            self.telegram.send(
+                f"🛑 KILL SWITCH TRIGGERED\n"
+                f"{self.counter} consecutive losing trades\n"
+                f"OMS disabled for the rest of the session\n\n"
+                f"Losses: {losses}\n"
+                f"Analysis: {analysis}\n\n"
+                f"Counter resets tomorrow at 09:15; halt itself needs "
+                f"/resume after review."
+            )
         if self.brain is not None:
             self.brain.store_lesson(
                 f"{self.counter} consecutive losses triggered kill switch",

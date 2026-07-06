@@ -38,14 +38,27 @@ def _load_secrets() -> dict[str, str]:
 
 
 class TelegramAlerter:
-    """Outbound-only alert channel. Synchronous interface."""
+    """Outbound-only alert channel. Synchronous interface.
+
+    chat_id is captured by the bot runner on the operator's first message
+    and persisted to config/secrets.env — send() re-reads it lazily so a
+    long-running scheduler picks it up without a restart.
+    """
 
     def __init__(self, token: str | None = None, chat_id: str | None = None,
                  test_mode: bool = False):
         self.token = token
         self.chat_id = chat_id
-        self.test_mode = test_mode or not (token and chat_id)
+        self.forced_test_mode = test_mode
         self.sent: list[str] = []  # test-mode ledger
+
+    @property
+    def test_mode(self) -> bool:
+        return self.forced_test_mode or not (self.token and self.chat_id)
+
+    @test_mode.setter
+    def test_mode(self, value: bool) -> None:
+        self.forced_test_mode = bool(value)
 
     @classmethod
     def from_config(cls) -> "TelegramAlerter":
@@ -55,9 +68,16 @@ class TelegramAlerter:
         chat = os.environ.get("TELEGRAM_CHAT_ID") or sec.get("TELEGRAM_CHAT_ID")
         return cls(token=token, chat_id=chat)
 
+    def _reload_chat_id(self) -> None:
+        """Pick up a chat_id persisted after this process started."""
+        if not self.chat_id:
+            self.chat_id = _load_secrets().get("TELEGRAM_CHAT_ID") or None
+
     # ------------------------------------------------------------------ #
 
-    def send(self, text: str) -> bool:
+    def send(self, text: str, parse_mode: str | None = None) -> bool:
+        if not self.forced_test_mode:
+            self._reload_chat_id()
         if self.test_mode:
             self.sent.append(text)
             logger.info("[telegram test-mode] %s", text)
@@ -67,7 +87,8 @@ class TelegramAlerter:
 
             async def _go():
                 await Bot(self.token).send_message(chat_id=self.chat_id,
-                                                   text=text)
+                                                   text=text,
+                                                   parse_mode=parse_mode)
             asyncio.run(_go())
             return True
         except Exception as e:  # noqa: BLE001
@@ -117,6 +138,44 @@ class TelegramAlerter:
     def error_alert(self, module: str, message: str) -> bool:
         return self.send(f"🚨 ERROR in {module}: {message}")
 
+    # ---- v4.0 trade lifecycle notifications ---------------------------- #
+
+    def trade_opened(self, ticker: str, direction: str, entry_price: float,
+                     qty: int, stop_loss: float, take_profit: float,
+                     score: int | None = None, agent_votes: dict | None = None,
+                     regime: str | None = None,
+                     reasoning: str | None = None) -> bool:
+        arrow = "📈" if direction == "LONG" else "📉"
+        votes = (" | ".join(f"{k}:{v}" for k, v in agent_votes.items())
+                 if agent_votes else None)
+        lines = [
+            f"{arrow} PAPER TRADE OPENED",
+            f"{ticker} — {direction} ×{qty}",
+            f"Entry:  ₹{entry_price:,.2f}",
+            f"Stop:   ₹{stop_loss:,.2f} (-2%)",
+            f"Target: ₹{take_profit:,.2f} (+4%)",
+        ]
+        if score is not None:
+            lines.append(f"Score: {score}/12"
+                         + (f" · Regime: {regime}" if regime else ""))
+        if votes:
+            lines.append(f"Votes: {votes}")
+        if reasoning:
+            lines.append(f"Why: {reasoning[:200]}")
+        return self.send("\n".join(lines))
+
+    def trade_closed(self, ticker: str, direction: str, entry_price: float,
+                     exit_price: float, pnl: float, pnl_pct: float,
+                     exit_reason: str, hold_days: int) -> bool:
+        emoji = "✅" if pnl > 0 else "🔴"
+        return self.send(
+            f"{emoji} PAPER TRADE CLOSED\n"
+            f"{ticker} — {direction}\n"
+            f"Entry ₹{entry_price:,.2f} → Exit ₹{exit_price:,.2f}\n"
+            f"P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2%})\n"
+            f"Held: {hold_days} day(s) · Reason: {exit_reason}"
+        )
+
     # Compatibility aliases (completion-loop prompt uses these names)
     def send_message(self, text: str) -> bool:
         return self.send(text)
@@ -129,6 +188,74 @@ def TelegramBot() -> "TelegramAlerter":
     return TelegramAlerter.from_config()
 
 
+HELP_TEXT = """🤖 QuNtra Command Guide
+Your AI quantitative research organization
+
+━━━━━━━━━━━━━━━━━━━━
+📊 PORTFOLIO & POSITIONS
+━━━━━━━━━━━━━━━━━━━━
+/status — Full system snapshot (P&L, regime, positions, health)
+/portfolio — Holdings breakdown with weights and sector exposure
+/positions — Open positions with live mark-to-market P&L
+/open_positions — Same as /positions
+/trades — Today's executed trades with P&L and exit reasons
+/signals — All signals generated today (executed + rejected)
+/paper_progress — Paper trading gate status (X/40 days)
+
+━━━━━━━━━━━━━━━━━━━━
+📈 PERFORMANCE
+━━━━━━━━━━━━━━━━━━━━
+/performance — Rolling Sharpe, win rate, max DD
+/daily_report — Full today's report (triggers immediately)
+/weekly_report — This week's board report
+/monthly_report — This month's investment letter
+
+━━━━━━━━━━━━━━━━━━━━
+🔬 RESEARCH & INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━
+/research — Latest pre-market research summary
+/regime — Current market regime + recent history
+/watchlist — Today's watchlist (tickers scoring ≥9/12)
+/macro — Current macro environment summary
+/note <text> — Send an observation for QuNtra to verify and act on
+/context — What QuNtra knows right now (regime, bias, key risks)
+/chat <question> — Ask QuNtra anything about markets or portfolio
+
+━━━━━━━━━━━━━━━━━━━━
+⚠️ RISK MANAGEMENT
+━━━━━━━━━━━━━━━━━━━━
+/risk — Risk dashboard (DD, consecutive losses, limits)
+/health — System health (DB, scheduler, APIs, last job run)
+/pause — Pause new signals (keeps existing positions open)
+/resume — Resume after pause or kill switch
+/override <signal_id> — Manually approve a blocked signal
+
+━━━━━━━━━━━━━━━━━━━━
+🚨 EMERGENCY
+━━━━━━━━━━━━━━━━━━━━
+/halt — Emergency stop all trading (keeps positions open)
+/emergency_stop — IMMEDIATE: halt + square ALL positions now
+/stop_live — Gracefully stop live trading (paper continues)
+/start_live — Initiate live trading (only after 40-day gate)
+
+━━━━━━━━━━━━━━━━━━━━
+ℹ️ SYSTEM
+━━━━━━━━━━━━━━━━━━━━
+/help — This guide
+/start — Re-send this guide
+/report — Quick EOD-style snapshot (legacy alias)
+
+💡 Example /note usage:
+  /note Oil prices spiking on Iran sanctions
+  /note RBI likely to cut rates next meeting
+
+QuNtra verifies each note against live data, scores its
+relevance to your portfolio, and updates research bias.
+━━━━━━━━━━━━━━━━━━━━
+Capital preservation is the highest priority.
+No live trading until the 40-day paper gate passes."""
+
+
 class QuNtraTelegramBot:
     """Inbound command center: 22 commands. Wire to a HermesCoordinator.
 
@@ -137,11 +264,60 @@ class QuNtraTelegramBot:
     polling loop.
     """
 
+    AUTHORIZED_USERS_KEY = "telegram_authorized_users"
+
     def __init__(self, hermes, alerter: TelegramAlerter | None = None,
                  db_url: str | None = None):
         self.hermes = hermes
         self.alerter = alerter or TelegramAlerter.from_config()
         self.db_url = db_url
+
+    # ---- authorization (first-contact capture + whitelist) ------------ #
+
+    def is_authorized(self, chat_id: int) -> bool:
+        """True when chat_id is on the whitelist. Empty whitelist means
+        nobody is authorized yet — the next message claims the bot."""
+        state = self.hermes.get_system_state(self.AUTHORIZED_USERS_KEY) or {}
+        return chat_id in [u["chat_id"] for u in state.get("users", [])]
+
+    def handle_first_contact(self, chat_id: int, username: str | None = None,
+                             first_name: str | None = None) -> str | None:
+        """Process a non-command message.
+
+        Returns the reply text, or None for a silent reject (unknown user
+        after the bot is claimed — no reply reveals the bot exists).
+        """
+        state = self.hermes.get_system_state(self.AUTHORIZED_USERS_KEY) or {}
+        users = state.get("users", [])
+        if not users:
+            users.append({
+                "chat_id": chat_id,
+                "username": username,
+                "first_name": first_name,
+                "authorized_at": datetime.now(IST).isoformat(),
+            })
+            self.hermes.set_system_state(self.AUTHORIZED_USERS_KEY,
+                                         {"users": users})
+            self._persist_chat_id_to_env(chat_id)
+            self.alerter.chat_id = str(chat_id)
+            logger.info("Telegram operator authorized: chat_id=%s user=%s",
+                        chat_id, username)
+            return (f"✅ QuNtra online. Welcome, {first_name or 'operator'}.\n"
+                    f"Your chat ID {chat_id} has been authorized.\n\n"
+                    + HELP_TEXT)
+        if chat_id not in [u["chat_id"] for u in users]:
+            logger.warning("Unauthorized Telegram contact from chat_id=%s "
+                           "(user=%s) — silently ignored", chat_id, username)
+            return None
+        return "Already authorized. Use /help for commands."
+
+    @staticmethod
+    def _persist_chat_id_to_env(chat_id: int) -> None:
+        """Write TELEGRAM_CHAT_ID to secrets.env so it survives restarts."""
+        lines = SECRETS.read_text().splitlines() if SECRETS.exists() else []
+        lines = [l for l in lines if not l.startswith("TELEGRAM_CHAT_ID=")]
+        lines.append(f"TELEGRAM_CHAT_ID={chat_id}")
+        SECRETS.write_text("\n".join(lines) + "\n")
 
     def _log_command(self, name: str) -> None:
         try:
@@ -323,9 +499,16 @@ class QuNtraTelegramBot:
             checks["Brain"] = f"DOWN ({e})"
         checks["DataFetcher"] = ("OK" if self._last_price("RELIANCE.NS")
                                  is not None else "DEGRADED (no quote)")
-        return "*SYSTEM HEALTH*\n" + "\n".join(
+        last_job = self.hermes.get_system_state("last_job_run") or {}
+        job_desc = (f"{last_job.get('name')} @ {last_job.get('at', '?')[:16]}"
+                    + (" (ERROR)" if last_job.get("error") else "")
+                    if last_job else "none recorded yet")
+        lines = ["*SYSTEM HEALTH*"] + [
             f"{'✅' if v == 'OK' else '⚠️'} {k}: {v}"
-            for k, v in checks.items())
+            for k, v in checks.items()
+        ] + [f"🕐 Last job: {job_desc}",
+             "📄 Mode: PAPER TRADING (live capital: ₹0)"]
+        return "\n".join(lines)
 
     def cmd_research(self) -> str:
         from src.reporting import metrics as M
@@ -424,16 +607,115 @@ class QuNtraTelegramBot:
         """Freeform Q&A over organizational memory + system state."""
         question = " ".join(words).strip()
         if not question:
-            return ("Ask me anything: /chat what did we learn about "
-                    "RELIANCE?")
-        from src.knowledge import KnowledgeManager
-        hits = KnowledgeManager(self.db_url).recall(question, limit=5)
-        if hits:
-            return ("*From QuNtra's memory:*\n" + "\n".join(
-                f"• [{h['knowledge_type']}] {h['content'][:150]}"
-                for h in hits))
-        return ("Nothing in memory matches that yet. Current context:\n"
-                + self.cmd_context())
+            return ("Usage: /chat <your question>\n"
+                    "Example: /chat what did we learn about RELIANCE?")
+        from src.agents.research import ResearchWriter
+        return ResearchWriter(self.db_url).answer_question(
+            question, {"regime": self.hermes.get_system_state("regime")})
+
+    # ---- discovery + today views (v4.0) ------------------------------- #
+
+    def cmd_help(self) -> str:
+        return HELP_TEXT
+
+    def cmd_start(self) -> str:
+        """Alias for /help (first-contact welcome handled by the runner)."""
+        return HELP_TEXT
+
+    def cmd_trades(self) -> str:
+        """Today's executed trades with entry/exit/P&L/reason."""
+        trades = self.hermes.brain.get_todays_trades()
+        if not trades:
+            return "📭 No trades executed today yet."
+        lines = ["📋 TODAY'S TRADES"]
+        for t in trades:
+            pnl = t.get("pnl")
+            emoji = "⬜" if pnl is None else ("✅" if pnl > 0 else "🔴")
+            exit_px = (f"₹{t['exit_price']:,.2f}" if t.get("exit_price")
+                       else "open")
+            pnl_str = f"₹{pnl:+,.2f}" if pnl is not None else "open"
+            lines.append(
+                f"{emoji} {t['ticker']} {t['direction']}\n"
+                f"   Entry ₹{t.get('entry_price') or 0:,.2f} → {exit_px}\n"
+                f"   Score {t.get('signal_score') or '?'}/12 · P&L {pnl_str}"
+                + (f" · {t.get('exit_reason')}" if t.get("exit_reason")
+                   else ""))
+        return "\n".join(lines)
+
+    def cmd_signals(self) -> str:
+        """All signals today: executed vs rejected with reasons."""
+        signals = self.hermes.brain.get_todays_signals()
+        if not signals:
+            return "📡 No signals generated today yet."
+        executed = [s for s in signals if s["executed"]]
+        rejected = [s for s in signals if not s["executed"]]
+        lines = [f"📡 TODAY'S SIGNALS — {len(executed)} executed, "
+                 f"{len(rejected)} rejected/scored"]
+        for s in signals[:10]:
+            icon = "✅" if s["executed"] else "▫️"
+            line = f"{icon} {s['ticker']} {s['direction'] or ''} · " \
+                   f"score {s['score']}/12"
+            if not s["executed"] and s.get("rejection_reason"):
+                line += f" · {s['rejection_reason']}"
+            lines.append(line)
+        if len(signals) > 10:
+            lines.append(f"… and {len(signals) - 10} more")
+        return "\n".join(lines)
+
+    REGIME_EMOJI = {
+        "BULL_TRENDING": "🟢", "BULL_VOLATILE": "🟡", "SIDEWAYS": "⬜",
+        "BEAR_TRENDING": "🔴", "BEAR_VOLATILE": "🟠", "CRISIS": "💀",
+    }
+
+    def cmd_regime(self) -> str:
+        """Current market regime + recent history."""
+        state = self.hermes.get_system_state("regime") or {}
+        current = state.get("state") or state.get("current", "UNKNOWN")
+        conf = state.get("confidence", 0)
+        history = (state.get("history") or [])[-5:]
+        lines = [f"📊 MARKET REGIME",
+                 f"{self.REGIME_EMOJI.get(current, '⬜')} {current}"
+                 + (f" (confidence {conf:.0%})" if conf else "")]
+        if history:
+            lines.append("Recent history:")
+            for h in history:
+                lines.append(f"  {h.get('date', '?')}: "
+                             f"{self.REGIME_EMOJI.get(h.get('regime'), '⬜')} "
+                             f"{h.get('regime', '?')}")
+        else:
+            lines.append("(no regime history yet — HMM refit is a Phase 3 "
+                         "upgrade; regime defaults to UNKNOWN)")
+        return "\n".join(lines)
+
+    def cmd_paper_progress(self) -> str:
+        """Compact paper-gate progress via paper_trading_status --telegram."""
+        import subprocess
+        import sys
+        r = subprocess.run(
+            [sys.executable, "scripts/paper_trading_status.py", "--telegram"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout.strip() or f"status script failed: {r.stderr[:200]}"
+
+    def cmd_macro(self) -> str:
+        """Latest macro snapshot from the macro agent's stored research."""
+        from src.reporting import metrics as M
+        pre = self.hermes.get_system_state("premarket") or {}
+        notes = [n for n in M.research_notes_since(self.db_url, hours=36)
+                 if n["source"] == "macro_agent"]
+        lines = ["🌍 MACRO ENVIRONMENT",
+                 f"Bias: {pre.get('macro_bias', 'UNKNOWN')}"]
+        cues = pre.get("global_cues") or {}
+        for name, move in cues.items():
+            if isinstance(move, (int, float)):
+                lines.append(f"  {name}: {move:+.2%}")
+        if notes:
+            lines.append(f"Latest: {notes[0]['summary']}")
+        return "\n".join(lines)
+
+    def cmd_positions(self) -> str:
+        """Alias for /open_positions."""
+        return self.cmd_open_positions()
 
     # ---- helpers ------------------------------------------------------ #
 
@@ -478,29 +760,62 @@ class QuNtraTelegramBot:
         "health", "research", "daily_report", "weekly_report",
         "monthly_report", "start_live", "stop_live", "emergency_stop",
         "note", "context", "chat",
+        # v4.0: discovery + today views
+        "help", "start", "trades", "signals", "regime", "paper_progress",
+        "macro", "positions",
     ]
 
     def run_polling(self):
-        from telegram.ext import ApplicationBuilder, CommandHandler
+        """Long-poll Telegram. Needs only the TOKEN — the chat_id is
+        captured from the operator's first message (handle_first_contact)."""
+        from telegram.ext import (ApplicationBuilder, CommandHandler,
+                                  MessageHandler, filters)
 
-        if self.alerter.test_mode:
+        if not self.alerter.token:
             raise RuntimeError(
-                "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing in "
-                "config/secrets.env — cannot start polling."
-            )
+                "TELEGRAM_BOT_TOKEN missing in config/secrets.env — "
+                "cannot start polling.")
 
         def make_handler(name):
             async def handler(update, context):
+                chat_id = update.effective_chat.id
+                if name == "start" and not self.is_authorized(chat_id):
+                    # /start doubles as the claim handshake
+                    reply = self.handle_first_contact(
+                        chat_id,
+                        username=getattr(update.effective_user,
+                                         "username", None),
+                        first_name=getattr(update.effective_user,
+                                           "first_name", None))
+                    if reply:
+                        await update.message.reply_text(reply[:4000])
+                    return
+                if not self.is_authorized(chat_id):
+                    return  # silent — don't reveal the bot exists
                 args = context.args or []
                 # dispatch() logs the call and absorbs all errors
                 reply = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: self.dispatch(name, *args))
-                await update.message.reply_text(reply[:4000])
+                for chunk in (reply[i:i + 4000]
+                              for i in range(0, len(reply), 4000)):
+                    await update.message.reply_text(chunk)
             return handler
+
+        async def on_message(update, context):
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.handle_first_contact(
+                    update.effective_chat.id,
+                    username=getattr(update.effective_user, "username", None),
+                    first_name=getattr(update.effective_user,
+                                       "first_name", None)))
+            if reply:  # None = silent reject
+                await update.message.reply_text(reply[:4000])
 
         app = ApplicationBuilder().token(self.alerter.token).build()
         for name in self.COMMANDS:
             app.add_handler(CommandHandler(name, make_handler(name)))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                       on_message))
         logger.info("Telegram bot polling started (%d commands)",
                     len(self.COMMANDS))
         app.run_polling()

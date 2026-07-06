@@ -13,9 +13,9 @@ class StubTrader:
     def __init__(self):
         self.orders = []
 
-    def place_order(self, ticker, direction, qty, signal_hash=None):
+    def place_order(self, ticker, direction, qty, signal_hash=None, **meta):
         trade = {"ticker": ticker, "direction": direction, "qty": qty,
-                 "signal_hash": signal_hash, "is_paper": True}
+                 "signal_hash": signal_hash, "is_paper": True, **meta}
         self.orders.append(trade)
         return trade
 

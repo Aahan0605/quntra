@@ -177,3 +177,52 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 - [DONE] PART C STARTED: scheduler PID in quntra.pid, paper gate day 1/40
   (2026-07-06). paper_trading_status.py verified. Remaining human steps:
   message @Sjebxhs_bot once for the chat ID; keep the machine running.
+
+## v4.0 hardening loop (2026-07-06, evening)
+
+- [DONE] S1: first-contact chat_id capture + authorized-user whitelist
+  (system_state + secrets.env persistence, silent reject for unknowns,
+  lazy chat_id reload in TelegramAlerter.send so the running scheduler
+  picks it up without restart). New process: scripts/run_telegram_bot.py
+  (polling needs token only). VERIFIED LIVE 2026-07-06 23:37 IST — the
+  operator messaged the bot, chat_id 6564672072 captured to DB +
+  secrets.env, welcome + /help delivered to the phone.
+- [DONE] S2: scripts/rotate_telegram_token.py (format-validated, prints
+  restart steps). Token rotation still recommended (was exposed in chat).
+- [DONE] T1: /help categorized 30-command guide + /start alias; sent
+  automatically on first contact. Plain text instead of Markdown —
+  Telegram's Markdown parser breaks on unescaped underscores; a help
+  command that sometimes fails to render is worse than an unstyled one.
+- [DONE] T2: /trades /signals /regime /paper_progress /macro /positions
+  added (30 commands total). Brain.get_todays_trades/get_todays_signals;
+  /chat now routes through ResearchWriter.answer_question (memory +
+  recent research + regime). exit_reason added to get_recent_trades.
+- [DONE] N1: PaperTrader pushes trade_opened (entry/SL/TP/score/votes/
+  reasoning) and trade_closed (P&L ₹ and %, hold days, reason);
+  notification failures can never block a fill. Hermes passes signal
+  meta into place_order; KiteOMS accepts **meta for interface parity.
+- [DONE] N2: morning briefing inside arm_system (08:45 job) — regime,
+  macro bias, watchlist, earnings blackout, top risks from the draft.
+- [DONE] N3: send_eod_report upgraded to compact EOD push (17:00) with
+  rolling metrics + paper-gate progress; zero-trade days handled.
+- [DONE] N4: DrawdownCircuitBreaker pushes Level 1/2/3 alerts with
+  actionable commands; kill-switch message now includes loss list +
+  mistake-report analysis + /resume guidance.
+- [DONE] W1: scripts/watchdog.py monitors scheduler AND bot runner
+  (60s cycle, max 3 restarts/hr/service, Telegram alert on give-up).
+  BUG FOUND IN LIVE TEST: killed child services become zombies and
+  os.kill(pid,0) still succeeds — fixed with ps stat= check + child
+  reaping. scripts/keep_mac_awake.sh (caffeinate -i -m -s).
+- [DONE] W2: /health shows last scheduled job (APScheduler listener
+  writes system_state.last_job_run) + PAPER/LIVE mode.
+- [DONE] P1: paper_trading_status.py --telegram compact output +
+  scheduler-health line; paper Sharpe convention fixed to rf=0 (was
+  rf=7% — inconsistent with the Phase-0 gate).
+- [DONE] P2: Friday 18:00 weekly paper recap job (scheduler now 14 jobs)
+  with gate-passed congratulations path.
+- [DEFERRED] Gap 11 (pre-execution approve/skip flow): belongs to live
+  trading (Phase 3) — paper trades are intentionally automatic, and
+  HUMAN_APPROVAL_REQUIRED already gates the first 30 live days.
+  Gap 10 (knowledge digest push): covered — the Sunday board report
+  embeds generate_knowledge_digest and is pushed via Telegram.
+- [DONE] Q: 220 tests passing (was 192); all offline.

@@ -23,12 +23,13 @@ class PaperTrader:
     SLIPPAGE_PCT = 0.0005  # 0.05% per side
 
     def __init__(self, brain, fetcher=None, cost_model: CostModel | None = None,
-                 starting_cash: float = 25_000.0):
+                 starting_cash: float = 25_000.0, telegram=None):
         self.brain = brain
         self.fetcher = fetcher
         self.costs = cost_model or CostModel.from_config()
         self.cash = starting_cash
         self.enabled = True
+        self.telegram = telegram   # trade lifecycle push notifications
         self._positions: dict[str, dict] = {}   # signal_hash -> trade
         self._orders: dict[str, dict] = {}      # order_id -> order
         self._seen_hashes: set[str] = set()
@@ -38,8 +39,12 @@ class PaperTrader:
 
     def place_order(self, ticker: str, direction: str, qty: int,
                     signal_hash: str | None = None,
-                    price: float | None = None) -> dict:
-        """Simulate a fill at live price +/- slippage. Idempotent by hash."""
+                    price: float | None = None, **meta) -> dict:
+        """Simulate a fill at live price +/- slippage. Idempotent by hash.
+
+        meta (optional): score, regime, reasoning, agent_votes — carried
+        into the DB row and the Telegram notification.
+        """
         if not self.enabled:
             return {"status": "REJECTED", "reason": "OMS disabled",
                     "ticker": ticker}
@@ -68,6 +73,8 @@ class PaperTrader:
             "quantity": qty,
             "entry_price": round(fill_price, 2),
             "entry_time": datetime.now(timezone.utc),
+            "signal_score": meta.get("score"),
+            "regime": meta.get("regime"),
             "is_paper": True,
             "status": "FILLED",
             "fees_inr": round(fees, 2),
@@ -85,6 +92,20 @@ class PaperTrader:
             logger.error("DB write failed for paper trade: %s", e)
         logger.info("PAPER FILL %s %s x%d @ %.2f (fees %.2f)",
                     direction, ticker, qty, fill_price, fees)
+        if self.telegram is not None:
+            try:
+                self.telegram.trade_opened(
+                    ticker=ticker, direction=direction,
+                    entry_price=fill_price, qty=qty,
+                    stop_loss=fill_price * (1 + self.STOP_LOSS_PCT),
+                    take_profit=fill_price * (1 + self.TAKE_PROFIT_PCT),
+                    score=meta.get("score"),
+                    agent_votes=meta.get("agent_votes"),
+                    regime=meta.get("regime"),
+                    reasoning=meta.get("reasoning"),
+                )
+            except Exception as e:  # noqa: BLE001 — alerts never block fills
+                logger.error("trade-open notification failed: %s", e)
         return trade
 
     def close_position(self, signal_hash: str, price: float | None = None,
@@ -125,6 +146,19 @@ class PaperTrader:
             })
         except Exception as e:  # noqa: BLE001
             logger.error("DB write failed for paper exit: %s", e)
+        if self.telegram is not None:
+            try:
+                hold_days = int(np.busday_count(
+                    pos["entry_time"].date(), pos["exit_time"].date()))
+                self.telegram.trade_closed(
+                    ticker=pos["ticker"], direction=pos["direction"],
+                    entry_price=float(pos["entry_price"]),
+                    exit_price=float(pos["exit_price"]),
+                    pnl=float(pos["pnl"]), pnl_pct=float(pos["pnl_pct"]),
+                    exit_reason=exit_reason, hold_days=hold_days,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("trade-close notification failed: %s", e)
         return pos
 
     def get_positions(self) -> list[dict]:

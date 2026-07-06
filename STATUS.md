@@ -1,9 +1,18 @@
 # QuNtra — Build Status
 
-Last updated: 2026-07-06 · Test suite: **192 passing** (+3 live-network integration tests)
+Last updated: 2026-07-06 (v4.0 hardening) · Test suite: **220 passing** (+3 live-network integration tests)
 
 The system goal: Backtesting → **Paper trading (40-day gate)** → Live money.
-Current position: **Parts A and B COMPLETE. Paper trading is LIVE (day 1/40).**
+Current position: **Parts A+B+v4.0 COMPLETE. Paper trading LIVE. Telegram control center LIVE on the operator's phone (chat_id captured 2026-07-06).**
+
+## ✅ v4.0 hardening (2026-07-06)
+
+- [x] First-contact chat_id capture + whitelist auth (verified live — operator authorized, /help delivered)
+- [x] 30 Telegram commands incl. /help /trades /signals /regime /paper_progress /macro /chat
+- [x] Auto-push: trade open/close, 08:45 morning briefing, 17:00 EOD, Friday 18:00 recap, risk levels 1/2/3, kill switch
+- [x] Three resident processes: scheduler (`quntra.pid`), bot runner (`telegram_bot.pid`), watchdog (`watchdog.pid`, zombie-aware, max 3 restarts/hr)
+- [x] `scripts/rotate_telegram_token.py` — **run this**: the token was exposed in a chat session
+- [x] `scripts/keep_mac_awake.sh` (caffeinate) — run it or the Mac's idle-sleep can still pause everything
 
 ---
 

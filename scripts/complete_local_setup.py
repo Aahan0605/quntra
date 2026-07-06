@@ -14,7 +14,7 @@ Steps:
   4. Full validation (Sharpe > 1.0, DD > -15%, Calmar > 0.70 — hard gate)
   5. Telegram check (pauses with instructions if secrets missing)
   6. Secrets verification
-  7. Scheduler dry-run (13/13 jobs)
+  7. Scheduler dry-run (14/14 jobs)
   8. Start paper trading (nohup, PID file, log tail)
 
 The script STOPS at any failed gate — per policy, never skip a phase gate.
@@ -232,7 +232,7 @@ def step7_dryrun() -> bool:
     if r.returncode != 0:
         fail("Dry-run failed — read the traceback above, fix, rerun --from 7")
         return False
-    ok("13/13 jobs passed")
+    ok("14/14 jobs passed")
     r = run("python3 scripts/smoke_test.py", timeout=300)
     if r.returncode != 0:
         fail("Smoke test failed — fix the integration issue, rerun --from 7")

@@ -92,6 +92,39 @@ class QuNtraBrain:
                 for r in rows
             ]
 
+    def get_todays_trades(self) -> list[dict]:
+        """Trades entered today (UTC date), most recent last."""
+        from datetime import timedelta
+        today = datetime.now(timezone.utc).date()
+        return [t for t in self.get_recent_trades(days=2)
+                if (t.get("entry_time") or datetime.now(timezone.utc)
+                    ).date() == today]
+
+    def get_todays_signals(self) -> list[dict]:
+        """All signals recorded today: executed and rejected."""
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        with self._session() as s:
+            rows = s.execute(
+                select(Signal)
+                .where(Signal.created_at >= cutoff)
+                .order_by(Signal.created_at.desc())
+            ).scalars().all()
+            today = datetime.now(timezone.utc).date()
+            return [
+                {
+                    "ticker": r.ticker,
+                    "direction": r.direction,
+                    "score": r.score,
+                    "executed": bool(r.executed),
+                    "rejection_reason": r.rejection_reason,
+                    "agent_votes": r.agent_votes,
+                    "at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+                if r.created_at and r.created_at.date() == today
+            ]
+
     def get_recent_trades(self, days: int = 90) -> list[dict]:
         """All closed trades from the last N calendar days, oldest first."""
         from datetime import timedelta
@@ -114,6 +147,7 @@ class QuNtraBrain:
                     "exit_time": r.exit_time,
                     "signal_score": r.signal_score,
                     "regime": r.regime,
+                    "exit_reason": r.exit_reason,
                     "is_paper": r.is_paper,
                 }
                 for r in rows

@@ -50,6 +50,27 @@ class CircuitState:
 
 
 class DrawdownCircuitBreaker:
+    LEVEL_ALERTS = {
+        CircuitLevel.LEVEL1: (
+            "⚠️ RISK ALERT — Level 1\n"
+            "Intraday drawdown hit -3%\n"
+            "Action: stops tightened, no new entries\n"
+            "Cooldown: 30 minutes\n"
+            "/risk for details"),
+        CircuitLevel.LEVEL2: (
+            "🔴 RISK ALERT — Level 2\n"
+            "Intraday drawdown hit -4.5%\n"
+            "Action: all positions squared, OMS disabled\n"
+            "Trading resumes tomorrow at 09:15 IST\n"
+            "/resume to override"),
+        CircuitLevel.LEVEL3: (
+            "💀 RISK ALERT — Level 3\n"
+            "5-day rolling drawdown hit -7%\n"
+            "Action: full system halt\n"
+            "Manual /resume required after review\n"
+            "/risk for the full breakdown"),
+    }
+
     def __init__(
         self,
         level1_dd: float = LEVEL1_INTRADAY_DD,
@@ -57,6 +78,7 @@ class DrawdownCircuitBreaker:
         level3_dd: float = LEVEL3_ROLLING_5D_DD,
         cooldown_minutes: int = COOLDOWN_MINUTES,
         consecutive_loss_limit: int = CONSECUTIVE_LOSS_LIMIT,
+        telegram=None,
     ):
         if not (level3_dd < level2_dd < level1_dd < 0):
             raise ValueError("Thresholds must satisfy level3 < level2 < level1 < 0")
@@ -65,7 +87,17 @@ class DrawdownCircuitBreaker:
         self.level3_dd = level3_dd
         self.cooldown = timedelta(minutes=cooldown_minutes)
         self.loss_limit = consecutive_loss_limit
+        self.telegram = telegram
         self.state = CircuitState()
+
+    def _alert(self, level: CircuitLevel) -> None:
+        """Push a level alert — never allowed to break risk handling."""
+        if self.telegram is None:
+            return
+        try:
+            self.telegram.send(self.LEVEL_ALERTS[level])
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ #
 
@@ -87,16 +119,19 @@ class DrawdownCircuitBreaker:
             s.oms_disabled = True
             s.manual_resume_required = True
             s.events.append(f"{now.isoformat()} LEVEL3 rolling5d={rolling_5d_dd:.3%}")
+            self._alert(CircuitLevel.LEVEL3)
         elif intraday_dd <= self.level2_dd and s.level < CircuitLevel.LEVEL2:
             s.level = CircuitLevel.LEVEL2
             s.square_all = True
             s.oms_disabled = True
             s.events.append(f"{now.isoformat()} LEVEL2 intraday={intraday_dd:.3%}")
+            self._alert(CircuitLevel.LEVEL2)
         elif intraday_dd <= self.level1_dd and s.level < CircuitLevel.LEVEL1:
             s.level = CircuitLevel.LEVEL1
             s.tighten_stops = True
             s.cooldown_until = now + self.cooldown
             s.events.append(f"{now.isoformat()} LEVEL1 intraday={intraday_dd:.3%}")
+            self._alert(CircuitLevel.LEVEL1)
 
         return s
 

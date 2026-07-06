@@ -81,6 +81,52 @@ class ResearchWriter(BaseResearchAgent):
         report = self.compose(context.get("outputs") or {}, context)
         return ResearchOutput(agent=self.name, summary=report, confidence=0.7)
 
+    def answer_question(self, question: str, context: dict | None = None) -> str:
+        """Freeform Q&A: organizational memory + recent research + state.
+
+        Deterministic synthesis (no LLM): recalls matching knowledge items
+        and research notes, then frames them with the current context.
+        """
+        context = context or {}
+        parts: list[str] = []
+
+        from src.knowledge import KnowledgeManager
+        hits = KnowledgeManager(self.db_url).recall(question, limit=4)
+        if hits:
+            parts.append("From QuNtra's memory:")
+            parts += [f"• [{h['knowledge_type']}] {h['content'][:160]}"
+                      for h in hits]
+
+        try:
+            from sqlalchemy import or_, select
+            from src.db import ResearchNote, get_session
+            terms = [t for t in question.lower().split() if len(t) >= 4][:5]
+            if terms:
+                with get_session(self.db_url) as s:
+                    rows = s.execute(
+                        select(ResearchNote)
+                        .where(or_(*[ResearchNote.summary.ilike(f"%{t}%")
+                                     for t in terms]))
+                        .order_by(ResearchNote.created_at.desc())
+                        .limit(3)
+                    ).scalars().all()
+                if rows:
+                    parts.append("Recent research:")
+                    parts += [f"• [{r.source}] {(r.summary or '')[:160]}"
+                              for r in rows]
+        except Exception:  # noqa: BLE001
+            pass
+
+        regime = (context.get("regime") or {})
+        regime_state = (regime.get("state") or regime.get("current")
+                        if isinstance(regime, dict) else regime) or "UNKNOWN"
+        parts.append(f"Current regime: {regime_state}.")
+        if not hits:
+            parts.append("Nothing specific in memory yet — the knowledge "
+                         "base grows with every trading day. Try /research "
+                         "or /context for the current picture.")
+        return "\n".join(parts)
+
     # ------------------------------------------------------------------ #
 
     @staticmethod
