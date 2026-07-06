@@ -138,6 +138,29 @@ class ResearchNote(Base):
     content: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     sentiment: Mapped[float | None] = mapped_column(Numeric(4, 2))
+    source: Mapped[str | None] = mapped_column(String(40), index=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    entities: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class KnowledgeItem(Base):
+    """Organizational memory — durable, queryable knowledge.
+
+    Types: TRADE_LESSON, MARKET_OBSERVATION, STRATEGY_INSIGHT,
+    COMPANY_RESEARCH, MACRO_OBSERVATION, GEOPOLITICAL_NOTE, MODEL_VERSION,
+    OVERNIGHT_RESEARCH.
+    """
+    __tablename__ = "knowledge_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    knowledge_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    tickers: Mapped[list | None] = mapped_column(JSON)
+    regime: Mapped[str | None] = mapped_column(String(30), index=True)
+    confidence: Mapped[float] = mapped_column(Numeric(4, 3), default=0.5)
+    source: Mapped[str | None] = mapped_column(String(60))
+    conditions: Mapped[dict | None] = mapped_column(JSON)  # macro snapshot
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -32,6 +32,13 @@ MIN_WATCHLIST_SCORE = 9   # out of 12 — pre-market watchlist gate
 
 
 class HermesCoordinator:
+    """QuNtra CEO. Delegates to specialist teams; never analyzes itself.
+
+    Teams: Research (news/macro/company/sector/fundamental/geopolitical +
+    writer), Quant (council, DailyTrainer, overnight pipeline), Risk
+    (circuit breaker, loss guard), Engineering (brain, knowledge, reports).
+    """
+
     def __init__(
         self,
         brain,
@@ -42,6 +49,8 @@ class HermesCoordinator:
         loss_guard=None,
         council=None,           # 6-agent council (existing intelligence layer)
         db_url: str | None = None,
+        research_team: dict | None = None,   # {name: agent} override for tests
+        knowledge=None,
     ):
         self.brain = brain
         self.trader = trader
@@ -51,6 +60,39 @@ class HermesCoordinator:
         self.loss_guard = loss_guard
         self.council = council
         self.db_url = db_url
+        self._research_team = research_team
+        self._knowledge = knowledge
+
+    # ------------------------------------------------------------------ #
+    # Lazily-built teams (injectable for tests)
+
+    @property
+    def research_team(self) -> dict:
+        if self._research_team is None:
+            from src.agents.research import (
+                CompanyAnalysisAgent,
+                FundamentalAgent,
+                GeopoliticalAgent,
+                MacroAgent,
+                NewsAgent,
+                SectorAgent,
+            )
+            self._research_team = {
+                "news_agent": NewsAgent(self.db_url),
+                "macro_agent": MacroAgent(self.db_url, fetcher=self.fetcher),
+                "geopolitical_agent": GeopoliticalAgent(self.db_url),
+                "fundamental_agent": FundamentalAgent(self.db_url),
+                "sector_agent": SectorAgent(self.db_url),
+                "company_analysis_agent": CompanyAnalysisAgent(self.db_url),
+            }
+        return self._research_team
+
+    @property
+    def knowledge(self):
+        if self._knowledge is None:
+            from src.knowledge import KnowledgeManager
+            self._knowledge = KnowledgeManager(self.db_url)
+        return self._knowledge
 
     # ------------------------------------------------------------------ #
     # System state (PostgreSQL-backed)
@@ -71,44 +113,90 @@ class HermesCoordinator:
     # Daily sequences
 
     def run_pre_market_sequence(self) -> dict:
-        """06:00–08:45 IST: research, cues, watchlist, risk limits."""
+        """06:00–08:45 IST: research team, synthesis, watchlist, risk limits."""
         now = datetime.now(IST)
         result = {"started_at": now.isoformat(), "steps": [], "watchlist": []}
 
-        # 1. Global cues (yfinance is allowed for non-India indices)
+        # 1-4. Research team: news, macro, geopolitical, earnings/events
+        outputs = {}
+        watch = (self.get_system_state("premarket") or {}).get("watchlist", [])
+        ctx = {"date": now.date().isoformat(), "watchlist": watch,
+               "regime": (self.get_system_state("regime") or {}).get(
+                   "state", "UNKNOWN")}
+        for name in ("news_agent", "macro_agent", "geopolitical_agent",
+                     "fundamental_agent", "sector_agent",
+                     "company_analysis_agent"):
+            agent = self.research_team.get(name)
+            if agent is None:
+                continue
+            out = agent.safe_run(ctx)
+            outputs[name] = out
+            agent.store(out)
+            result["steps"].append(f"{name}: "
+                                   + ("ok" if out.ok else f"ERROR {out.error}"))
+
+        # Legacy global cues (kept for downstream consumers)
         cues = self._safe(self._fetch_global_cues, "global_cues", result)
 
-        # 2. News sentiment scan (delegated to council/sentiment agent)
-        if self.council is not None and hasattr(self.council, "scan_news"):
-            self._safe(self.council.scan_news, "news_scan", result)
+        # 5. Risk snapshot before arming
+        risk_snapshot = {
+            "circuit_halted": (not self.circuit.can_enter_new_position(now)
+                               if self.circuit is not None else False),
+            "loss_guard_halted": (self.loss_guard.halted
+                                  if self.loss_guard is not None else False),
+        }
 
-        # 3. Options flow (OFIE) — delegated
-        if self.council is not None and hasattr(self.council, "scan_options_flow"):
-            self._safe(self.council.scan_options_flow, "options_flow", result)
+        # 6. Synthesize the pre-market intelligence report
+        report = self._safe(
+            lambda: self._compose_premarket_report(outputs, ctx),
+            "research_synthesis", result) or ""
 
-        # 4-5. Council pre-market scoring -> watchlist (score >= 9/12)
+        # 7-8. Council scoring -> watchlist, filtered through risk limits
         watchlist = []
         if self.council is not None and hasattr(self.council, "score_premarket"):
             scores = self._safe(
                 lambda: self.council.score_premarket(UNIVERSE), "council_scoring",
                 result) or {}
             watchlist = [t for t, sc in scores.items() if sc >= MIN_WATCHLIST_SCORE]
+        # Earnings blackout: never trade into a report
+        corp = outputs.get("company_analysis_agent")
+        blackout = (corp.payload.get("earnings_blackout", [])
+                    if corp is not None and corp.ok else [])
+        watchlist = [t for t in watchlist if t not in blackout]
         result["watchlist"] = watchlist
 
-        # 6. Day risk limits + reset daily guards
+        # Risk limits + daily guard reset
         if self.circuit is not None:
             self.circuit.reset_daily()
         if self.loss_guard is not None:
             self.loss_guard.reset()
 
+        # 9. Telegram
+        if self.telegram is not None and report:
+            self._safe(lambda: self.telegram.send(report), "telegram", result)
+
+        # 10. Persist state
         self.set_system_state("premarket", {
             "date": now.date().isoformat(),
             "watchlist": watchlist,
+            "earnings_blackout": blackout,
             "global_cues": cues,
+            "risk_snapshot": risk_snapshot,
+            "macro_bias": (outputs.get("macro_agent").payload.get("macro_bias")
+                           if outputs.get("macro_agent") is not None
+                           and outputs["macro_agent"].ok else "UNKNOWN"),
         })
         self.set_system_state("oms", {"enabled": True, "armed_at": now.isoformat()})
         logger.info("Pre-market complete. Watchlist: %s", watchlist)
         return result
+
+    def _compose_premarket_report(self, outputs: dict, ctx: dict) -> str:
+        from src.agents.research import ResearchWriter
+        return ResearchWriter(self.db_url).compose(outputs, ctx)
+
+    # Vision-v1.0 name; the scheduler's 60s job calls run_market_session()
+    def run_market_session_tick(self) -> dict:
+        return self.run_market_session()
 
     def run_market_session(self) -> dict:
         """09:30–14:30 IST — called every 60 seconds by the scheduler."""
@@ -174,36 +262,96 @@ class HermesCoordinator:
             for agent_name, correct in outcomes:
                 self.brain.update_agent_credibility(agent_name, correct)
 
-        # 5. Journal is already in PostgreSQL via brain.remember_trade
+        # 5. Lessons learned from today's losing trades -> knowledge base
+        self._safe(self._store_daily_lessons, "lessons", result)
 
-        # 6. Telegram EOD report
-        if self.telegram is not None:
-            summary = self._build_eod_summary()
-            self._safe(lambda: self.telegram.send(summary), "eod_report", result)
+        # 6. Journal is already in PostgreSQL via brain.remember_trade
+
+        # 7. Full EOD report (metrics from DB) via Telegram + archive
+        self._safe(self._send_daily_report, "eod_report", result)
 
         self.set_system_state("post_market", {"date": now.date().isoformat(),
                                               "done": True})
         return result
 
+    def _store_daily_lessons(self) -> None:
+        """Every losing trade closed today becomes a TRADE_LESSON."""
+        from datetime import timezone as _tz
+        today = datetime.now(_tz.utc).date()
+        regime = (self.get_system_state("regime") or {}).get("state")
+        for t in self.brain.get_recent_trades(days=2):
+            exit_time = t.get("exit_time")
+            if exit_time is None or exit_time.date() != today:
+                continue
+            pnl = t.get("pnl") or 0
+            if pnl >= 0:
+                continue
+            self.knowledge.store(
+                knowledge_type="TRADE_LESSON",
+                content=(f"LOSS ₹{pnl:,.0f} on {t['ticker']} "
+                         f"({t['direction']}, score {t.get('signal_score')}, "
+                         f"regime {t.get('regime')}) — review entry conditions"),
+                tickers=[t["ticker"]],
+                confidence=0.6,
+                source="post_market_review",
+                regime=regime or t.get("regime"),
+            )
+
+    def _send_daily_report(self) -> None:
+        from src.reporting import DailyReport
+        DailyReport(self.db_url, telegram=self.telegram).generate()
+
     def run_overnight_batch(self) -> dict:
-        """22:00–06:00 IST: retrain, optimize, refit, calendar."""
+        """22:00–06:00 IST: learn from trades, research, optimize, refit."""
         now = datetime.now(IST)
         result = {"at": now.isoformat(), "steps": []}
+
+        # 1. Daily self-learning loop (rolling 90-day trade retrain)
+        self._safe(self._run_daily_trainer, "daily_trainer", result)
+
+        # 2-4. Council-owned optimizers (QAOA, genetic, HMM) when wired
         for step_name, attr in [
-            ("xgb_retrain", "retrain_models"),
             ("qaoa_reoptimize", "run_qaoa"),
             ("genetic_evolve", "evolve_generation"),
             ("hmm_refit", "refit_regime"),
-            ("events_calendar", "fetch_calendar"),
         ]:
             target = getattr(self.council, attr, None) if self.council else None
             if callable(target):
                 self._safe(target, step_name, result)
             else:
                 result["steps"].append(f"{step_name}: no handler (skipped)")
+
+        # 5-10. The nine-task overnight research pipeline (company reads,
+        # RBI, macro, papers, maintenance, tomorrow's pre-market draft)
+        self._safe(self._run_overnight_pipeline, "research_pipeline", result)
+
         self.set_system_state("overnight", {"date": now.date().isoformat(),
                                             "result": result["steps"]})
         return result
+
+    def _run_daily_trainer(self) -> None:
+        from src.learning import DailyTrainer
+        DailyTrainer(self.brain, self.db_url, telegram=self.telegram).run()
+
+    def _run_overnight_pipeline(self) -> None:
+        from src.research import OvernightResearchPipeline
+        report = OvernightResearchPipeline(
+            self.db_url, telegram=self.telegram,
+            knowledge=self.knowledge, fetcher=self.fetcher).run()
+        logger.info("Overnight pipeline: %s", report.summary())
+
+    # ------------------------------------------------------------------ #
+    # Periodic reports
+
+    def generate_weekly_board_report(self) -> str:
+        """Sunday 8 PM IST: internal board report."""
+        from src.reporting import WeeklyReport
+        return WeeklyReport(self.db_url, telegram=self.telegram).generate()
+
+    def generate_monthly_investment_letter(self) -> str:
+        """1st of month, 9 AM IST: investment letter."""
+        from src.reporting import MonthlyLetter
+        return MonthlyLetter(self.db_url, telegram=self.telegram).generate()
 
     # ------------------------------------------------------------------ #
     # Scheduler hook points (thin wrappers so cron jobs stay 1-liners)

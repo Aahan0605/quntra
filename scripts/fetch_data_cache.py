@@ -13,7 +13,10 @@ Output: data/cache/<TICKER>.csv with columns date,open,high,low,close,volume
 plus data/cache/NIFTY50_BENCH.csv (^NSEI) for benchmark comparison.
 """
 import argparse
+import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -27,19 +30,42 @@ from src.utils.universe import UNIVERSE, nse_symbol  # noqa: E402
 CACHE = ROOT / "data" / "cache"
 COLS = ["date", "open", "high", "low", "close", "volume"]
 
+# NSE tarpits blocked clients: connections establish but never answer, and
+# jugaad-data sets no timeout — without these guards a fetch hangs forever
+# (observed 4h45m with zero rows on 2026-07-05).
+socket.setdefaulttimeout(15)
+JUGAAD_DEADLINE_S = 45          # per-ticker budget before yfinance failover
+_jugaad_timeouts = 0            # consecutive; 2 strikes disables the source
+_executor = ThreadPoolExecutor(max_workers=2)
+
 
 def fetch_jugaad(symbol: str, start: date, end: date) -> pd.DataFrame | None:
+    global _jugaad_timeouts
+    if _jugaad_timeouts >= 2:
+        return None  # NSE is blocking us today — stop wasting the deadline
     try:
-        from jugaad_data.nse import stock_df
-        df = stock_df(symbol=symbol, from_date=start, to_date=end, series="EQ")
-        df = df.rename(columns={
-            "DATE": "date", "OPEN": "open", "HIGH": "high",
-            "LOW": "low", "CLOSE": "close", "VOLUME": "volume",
-        })[COLS]
-        return df.sort_values("date").reset_index(drop=True)
+        fut = _executor.submit(_fetch_jugaad_inner, symbol, start, end)
+        df = fut.result(timeout=JUGAAD_DEADLINE_S)
+        _jugaad_timeouts = 0
+        return df
+    except FutureTimeout:
+        _jugaad_timeouts += 1
+        print(f"  jugaad-data timed out for {symbol} "
+              f"(strike {_jugaad_timeouts}/2) — falling back to yfinance")
+        return None
     except Exception as e:  # noqa: BLE001
         print(f"  jugaad-data failed for {symbol}: {e}")
         return None
+
+
+def _fetch_jugaad_inner(symbol: str, start: date, end: date) -> pd.DataFrame | None:
+    from jugaad_data.nse import stock_df
+    df = stock_df(symbol=symbol, from_date=start, to_date=end, series="EQ")
+    df = df.rename(columns={
+        "DATE": "date", "OPEN": "open", "HIGH": "high",
+        "LOW": "low", "CLOSE": "close", "VOLUME": "volume",
+    })[COLS]
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def fetch_yf(ticker: str, start: date, end: date) -> pd.DataFrame | None:
@@ -130,6 +156,7 @@ def main() -> int:
           f"date range {first_date} to {last_date}")
     if failed:
         print("Failed:", failed)
+    _executor.shutdown(wait=False, cancel_futures=True)
     if ok < 23:
         print(f"GATE FAIL: need >= 23/25 tickers, got {ok}")
         return 1
@@ -137,4 +164,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # os._exit, not sys.exit: hung jugaad threads (NSE tarpit) survive
+    # socket timeouts, and ThreadPoolExecutor's atexit join would block
+    # process exit forever (observed 18h hang on 2026-07-05).
+    sys.stdout.flush()
+    sys.stderr.flush()
+    import os
+    os._exit(rc)

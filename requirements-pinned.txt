@@ -1,6 +1,7 @@
 # QuNtra pinned runtime — verified working combination (2026-07-05)
 # All model pickles MUST be trained and loaded under these exact versions.
 # Install: pip install -r requirements-pinned.txt
+#          pip install --no-deps jugaad-data==0.28   # see note at its entry
 
 # Core numerics (pickle-compatibility critical)
 numpy==2.2.6
@@ -11,12 +12,17 @@ xgboost==3.2.0            # via xgboost-cpu wheel on constrained hosts: pip inst
 
 # Data
 yfinance==1.5.1           # global indices ONLY — not for Indian equity
-jugaad-data==0.28         # NSE/BSE/RBI historical + live
+# jugaad-data==0.28       # NSE/BSE/RBI — MUST be installed with --no-deps:
+#   its beautifulsoup4==4.9.3 pin conflicts with yfinance's >=4.11.1,
+#   but it runs fine on modern bs4 (verified 2026-07-05 on Python 3.10)
 pandas-market-calendars==5.4.0
+appdirs==1.4.4            # jugaad-data runtime dep
+click                     # jugaad-data runtime dep
 
 # Infrastructure
 SQLAlchemy==2.0.51
 alembic==1.18.5
+psycopg2-binary==2.9.12   # PostgreSQL driver — POSTGRES_URL uses psycopg2
 APScheduler==3.11.3
 pytz==2026.2
 python-dotenv==1.2.2

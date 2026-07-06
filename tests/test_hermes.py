@@ -49,12 +49,58 @@ class StubTelegram:
         self.messages.append(msg)
 
 
+class StubResearchAgent:
+    """Offline stand-in for any research agent."""
+
+    def __init__(self, name, payload=None):
+        self.name = name
+        self.payload = payload or {}
+        self.calls = []
+
+    def safe_run(self, context):
+        from src.agents.research.base import ResearchOutput
+        self.calls.append(context)
+        return ResearchOutput(agent=self.name, summary=f"{self.name} ok",
+                              confidence=0.7, payload=self.payload)
+
+    def store(self, output):
+        return None
+
+
+def stub_research_team():
+    return {
+        "news_agent": StubResearchAgent("news_agent",
+                                        {"avg_sentiment": 0.1}),
+        "macro_agent": StubResearchAgent("macro_agent",
+                                         {"macro_bias": "NEUTRAL",
+                                          "moves": {}}),
+        "geopolitical_agent": StubResearchAgent(
+            "geopolitical_agent",
+            {"geopolitical_risk_score": 2.0, "top_events": []}),
+        "fundamental_agent": StubResearchAgent("fundamental_agent"),
+        "sector_agent": StubResearchAgent("sector_agent",
+                                          {"leaders": ["IT"],
+                                           "laggards": ["BANKS"]}),
+        "company_analysis_agent": StubResearchAgent(
+            "company_analysis_agent", {"earnings_blackout": []}),
+    }
+
+
 @pytest.fixture
 def hermes(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path}/hermes.db"
     monkeypatch.setattr(db_session, "_engine", None)
     monkeypatch.setattr(db_session, "_SessionLocal", None)
     init_db(url)
+    # No network in tests: kill RSS/yfinance helpers everywhere
+    import src.agents.research.base as research_base
+    monkeypatch.setattr(research_base, "fetch_rss", lambda *a, **k: [])
+    monkeypatch.setattr(research_base, "yf_pct_change",
+                        lambda *a, **k: None)
+    import src.agents.research.macro_agent as macro_mod
+    monkeypatch.setattr(macro_mod, "yf_pct_change", lambda *a, **k: None)
+    import src.reporting.metrics as metrics_mod
+    monkeypatch.setattr(metrics_mod, "nifty_move_today", lambda: None)
     h = HermesCoordinator(
         brain=QuNtraBrain(),
         trader=StubTrader(),
@@ -62,6 +108,7 @@ def hermes(tmp_path, monkeypatch):
         circuit_breaker=DrawdownCircuitBreaker(),
         loss_guard=ConsecutiveLossGuard(),
         council=StubCouncil(),
+        research_team=stub_research_team(),
     )
     yield h
     monkeypatch.setattr(db_session, "_engine", None)
@@ -113,7 +160,30 @@ def test_post_market_updates_credibility(hermes):
     hermes.run_post_market_sequence()
     assert hermes.brain.get_agent_credibility("technical") == pytest.approx(1.05)
     assert hermes.brain.get_agent_credibility("sentiment") == pytest.approx(0.95)
-    assert len(hermes.telegram.messages) == 1  # EOD report
+    # pre-market intelligence report + EOD daily report
+    assert len(hermes.telegram.messages) == 2
+    assert any("PRE-MARKET" in m for m in hermes.telegram.messages)
+    assert any("DAILY REPORT" in m for m in hermes.telegram.messages)
+
+
+def test_pre_market_calls_all_research_agents(hermes):
+    hermes.run_pre_market_sequence()
+    for name, agent in hermes.research_team.items():
+        assert agent.calls, f"{name} was not triggered"
+    assert any("PRE-MARKET INTELLIGENCE" in m
+               for m in hermes.telegram.messages)
+
+
+def test_pre_market_respects_earnings_blackout(hermes):
+    hermes.research_team["company_analysis_agent"].payload = {
+        "earnings_blackout": [t for t in
+                              __import__("src.utils.universe",
+                                         fromlist=["UNIVERSE"]).UNIVERSE[:1]]
+    }
+    result = hermes.run_pre_market_sequence()
+    blocked = hermes.research_team["company_analysis_agent"].payload[
+        "earnings_blackout"]
+    assert all(t not in result["watchlist"] for t in blocked)
 
 
 def test_overnight_batch_skips_missing_handlers(hermes):

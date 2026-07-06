@@ -2,11 +2,16 @@
 Train the 25 per-ticker XGBoost direction models — leakage-safe.
 
 * Features computed only from information available at time t
-  (returns, vol, RSI, MACD, momentum, volume z-score — all lagged).
-* Label: next-day close-to-close direction (1 = up).
-* Chronological split: last 20% of rows are out-of-sample (OOS).
-* Deployment gate: OOS accuracy >= 0.54, else model is saved to
-  data/models/rejected/ and excluded from the live universe.
+  (returns, vol, RSI, MACD, momentum, volume z-score, benchmark-relative
+  strength — all lagged).
+* Label: 5-trading-day forward close-to-close direction (1 = up).
+  Matches the weekly rebalancing horizon; next-day direction on large-cap
+  NSE names proved unlearnable (~50% OOS across 24 tickers, 2026-07-06).
+* Chronological split: last 20% of rows are out-of-sample (OOS), with a
+  HORIZON-day purge gap at the boundary so overlapping labels can't leak.
+* Deployment gate: OOS accuracy >= max(0.54, OOS base rate + 0.01).
+  The base-rate floor stops upward drift from passing as skill — a model
+  that can't beat always-up has no edge worth deploying.
 
 Run inside the pinned environment (requirements-pinned.txt):
 
@@ -34,6 +39,8 @@ MODEL_DIR = ROOT / "data" / "models"
 REJECT_DIR = MODEL_DIR / "rejected"
 OOS_GATE = 0.54
 OOS_FRACTION = 0.20
+HORIZON = 5                  # forward label horizon, trading days
+BASE_RATE_MARGIN = 0.01      # must beat always-up by at least this
 
 
 # --------------------------------------------------------------------- #
@@ -47,7 +54,8 @@ def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return 100 - 100 / (1 + rs)
 
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_features(df: pd.DataFrame,
+                   bench: pd.Series | None = None) -> pd.DataFrame:
     close, vol = df["close"], df["volume"]
     f = pd.DataFrame(index=df.index)
     f["ret_1d"] = close.pct_change()
@@ -65,35 +73,56 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     f["px_vs_sma50"] = close / close.rolling(50).mean() - 1
     f["volume_z"] = (vol - vol.rolling(20).mean()) / vol.rolling(20).std()
     f["hl_range"] = (df["high"] - df["low"]) / close
+    f["dist_52w_high"] = close / close.rolling(252, min_periods=60).max() - 1
+    if bench is not None:
+        b = bench.reindex(f.index).ffill()
+        f["rel_nifty_5d"] = close.pct_change(5) - b.pct_change(5)
+        f["rel_nifty_20d"] = close.pct_change(20) - b.pct_change(20)
     return f
 
 
-def build_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    X = build_features(df)
-    y = (df["close"].shift(-1) > df["close"]).astype(int)  # next-day direction
-    data = X.join(y.rename("label")).dropna()
+def build_dataset(df: pd.DataFrame,
+                  bench: pd.Series | None = None
+                  ) -> tuple[pd.DataFrame, pd.Series]:
+    X = build_features(df, bench)
+    # HORIZON-day forward direction — matches the weekly holding period
+    y = (df["close"].shift(-HORIZON) > df["close"]).astype(int)
+    data = X.join(y.rename("label")).iloc[:-HORIZON].dropna()
     return data.drop(columns="label"), data["label"]
 
 
 # --------------------------------------------------------------------- #
 
-def train_one(ticker: str) -> dict:
+def _load_benchmark() -> pd.Series | None:
+    try:
+        from src.utils.cache_loader import load_benchmark
+        return load_benchmark()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def train_one(ticker: str, bench: pd.Series | None = None) -> dict:
     from xgboost import XGBClassifier
 
     df = load_ticker(ticker)
-    X, y = build_dataset(df)
+    X, y = build_dataset(df, bench)
     split = int(len(X) * (1 - OOS_FRACTION))
-    X_tr, X_te = X.iloc[:split], X.iloc[split:]
-    y_tr, y_te = y.iloc[:split], y.iloc[split:]
+    # Purge HORIZON rows at the boundary: a t in train with t+5 label
+    # overlapping the OOS window would leak future information.
+    X_tr, X_te = X.iloc[:split - HORIZON], X.iloc[split:]
+    y_tr, y_te = y.iloc[:split - HORIZON], y.iloc[split:]
 
     model = XGBClassifier(
-        n_estimators=300, max_depth=4, learning_rate=0.05,
+        n_estimators=200, max_depth=4, learning_rate=0.05,
         subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+        min_child_weight=5,
         eval_metric="logloss", n_jobs=2, random_state=42,
     )
     model.fit(X_tr, y_tr)
     oos_acc = float((model.predict(X_te) == y_te).mean())
-    passed = oos_acc >= OOS_GATE
+    base_rate = float(max(y_te.mean(), 1 - y_te.mean()))
+    effective_gate = max(OOS_GATE, base_rate + BASE_RATE_MARGIN)
+    passed = oos_acc >= effective_gate
 
     out_dir = MODEL_DIR if passed else REJECT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +133,9 @@ def train_one(ticker: str) -> dict:
     meta = {
         "ticker": ticker,
         "oos_accuracy": round(oos_acc, 4),
-        "gate": OOS_GATE,
+        "oos_base_rate": round(base_rate, 4),
+        "gate": round(effective_gate, 4),
+        "label_horizon_days": HORIZON,
         "passed_gate": passed,
         "n_train": len(X_tr),
         "n_oos": len(X_te),
@@ -150,12 +181,15 @@ def main() -> int:
         from src.utils import cache_loader
         cache_loader.CACHE = Path(args.data_dir)
 
+    bench = _load_benchmark()
     results = []
     for t in UNIVERSE:
         try:
-            meta = train_one(t)
+            meta = train_one(t, bench)
             tag = "PASS" if meta["passed_gate"] else "REJECT"
-            print(f"{tag}  {t:16s} OOS acc {meta['oos_accuracy']:.4f}")
+            print(f"{tag}  {t:16s} OOS acc {meta['oos_accuracy']:.4f} "
+                  f"(base {meta['oos_base_rate']:.4f}, "
+                  f"gate {meta['gate']:.4f})")
             results.append(meta)
         except FileNotFoundError as e:
             print(f"SKIP  {t:16s} {e}")

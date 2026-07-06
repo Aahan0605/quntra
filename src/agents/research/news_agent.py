@@ -1,0 +1,122 @@
+"""
+NewsAgent — scans trusted Indian financial news for market-moving items.
+
+Sources (all public RSS): Economic Times Markets, Moneycontrol,
+Business Standard Markets. Sentiment: keyword scoring (FinBERT optional,
+Phase 3). Only items with relevance > 0.5 are stored.
+"""
+
+from __future__ import annotations
+
+from src.agents.research.base import BaseResearchAgent, ResearchOutput, fetch_rss
+from src.utils.universe import UNIVERSE, nse_symbol
+
+FEEDS = {
+    "economic_times": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "moneycontrol": "https://www.moneycontrol.com/rss/marketsnews.xml",
+    "business_standard": "https://www.business-standard.com/rss/markets-106.rss",
+}
+
+POSITIVE_WORDS = {
+    "surge", "rally", "gain", "jump", "record", "upgrade", "beat", "profit",
+    "growth", "strong", "bullish", "buy", "outperform", "expansion", "wins",
+}
+NEGATIVE_WORDS = {
+    "fall", "drop", "crash", "plunge", "downgrade", "miss", "loss", "weak",
+    "bearish", "sell", "underperform", "fraud", "probe", "default", "cuts",
+}
+
+# Company name fragments -> universe ticker (headline matching)
+COMPANY_KEYWORDS = {
+    "reliance": "RELIANCE.NS", "tcs": "TCS.NS", "tata consultancy": "TCS.NS",
+    "hdfc bank": "HDFCBANK.NS", "icici": "ICICIBANK.NS", "infosys": "INFY.NS",
+    "airtel": "BHARTIARTL.NS", "itc": "ITC.NS", "larsen": "LT.NS",
+    "l&t": "LT.NS", "sbi": "SBIN.NS", "state bank": "SBIN.NS",
+    "axis bank": "AXISBANK.NS", "kotak": "KOTAKBANK.NS",
+    "hindustan unilever": "HINDUNILVR.NS", "bajaj finance": "BAJFINANCE.NS",
+    "maruti": "MARUTI.NS", "mahindra": "M&M.NS", "sun pharma": "SUNPHARMA.NS",
+    "titan": "TITAN.NS", "ultratech": "ULTRACEMCO.NS", "ntpc": "NTPC.NS",
+    "power grid": "POWERGRID.NS", "tata steel": "TATASTEEL.NS",
+    "tata motors": "TATAMOTORS.NS", "asian paints": "ASIANPAINT.NS",
+    "hcl": "HCLTECH.NS", "wipro": "WIPRO.NS",
+}
+
+MARKET_KEYWORDS = {"nifty", "sensex", "nse", "bse", "fii", "dii", "rbi",
+                   "sebi", "rupee", "market"}
+
+
+def score_sentiment(text: str) -> float:
+    """Keyword sentiment in [-1, 1]."""
+    words = set(text.lower().split())
+    pos = len(words & POSITIVE_WORDS)
+    neg = len(words & NEGATIVE_WORDS)
+    if pos + neg == 0:
+        return 0.0
+    return round((pos - neg) / (pos + neg), 2)
+
+
+def score_relevance(text: str, watchlist: list[str] | None = None) -> tuple[float, list[str]]:
+    """Relevance in [0, 1] + matched universe tickers."""
+    low = text.lower()
+    tickers = sorted({tck for kw, tck in COMPANY_KEYWORDS.items() if kw in low})
+    relevance = 0.0
+    if tickers:
+        relevance = 0.7
+        if watchlist and any(t in watchlist for t in tickers):
+            relevance = 0.9
+    elif any(kw in low for kw in MARKET_KEYWORDS):
+        relevance = 0.55
+    return relevance, tickers
+
+
+class NewsAgent(BaseResearchAgent):
+    name = "news_agent"
+    description = "scans trusted Indian financial news RSS feeds"
+    note_type = "news"
+
+    def __init__(self, db_url: str | None = None, feeds: dict | None = None):
+        super().__init__(db_url)
+        self.feeds = feeds or FEEDS
+
+    def run(self, context: dict) -> ResearchOutput:
+        watchlist = context.get("watchlist") or []
+        items, sources_used = [], []
+        for source, url in self.feeds.items():
+            entries = fetch_rss(url, limit=25)
+            if entries:
+                sources_used.append(source)
+            for e in entries:
+                text = f"{e['title']} {e['summary']}"
+                relevance, tickers = score_relevance(text, watchlist)
+                if relevance <= 0.5:
+                    continue
+                items.append({
+                    "title": e["title"],
+                    "source": source,
+                    "link": e["link"],
+                    "sentiment": score_sentiment(text),
+                    "relevance": relevance,
+                    "tickers": tickers,
+                })
+
+        items.sort(key=lambda x: (-x["relevance"], -abs(x["sentiment"])))
+        items = items[:20]
+        avg_sent = (round(sum(i["sentiment"] for i in items) / len(items), 2)
+                    if items else 0.0)
+        summary = (f"{len(items)} relevant news items from "
+                   f"{len(sources_used)}/{len(self.feeds)} feeds; "
+                   f"average sentiment {avg_sent:+.2f}"
+                   if sources_used else
+                   "No news feeds reachable — flying without news today")
+        return ResearchOutput(
+            agent=self.name,
+            summary=summary,
+            findings=items,
+            confidence=0.7 if sources_used else 0.0,
+            sources=sources_used,
+            reasoning="keyword sentiment over trusted RSS; relevance gate 0.5",
+            payload={"avg_sentiment": avg_sent,
+                     "n_items": len(items),
+                     "tickers_in_news": sorted({t for i in items
+                                                for t in i["tickers"]})},
+        )

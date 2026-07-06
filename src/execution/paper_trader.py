@@ -12,6 +12,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import numpy as np
+
 from src.utils.costs import CostModel
 
 logger = logging.getLogger("quntra.paper")
@@ -134,9 +136,45 @@ class PaperTrader:
             return False  # already filled — paper fills are instant
         return self._orders.pop(order_id, None) is not None
 
+    STOP_LOSS_PCT = -0.02      # hard stop per position
+    TAKE_PROFIT_PCT = 0.04     # 2:1 reward:risk
+    TIME_STOP_DAYS = 5         # matches the 5-day signal horizon
+
     def manage_positions(self) -> list:
-        """Trailing-stop management hook — extended in Phase 2 live loop."""
-        return []
+        """Exit engine: stop-loss / take-profit / 5-day time stop.
+
+        Called every session tick by Hermes. Without exits no trade ever
+        closes, and the 40-day paper gate has nothing to measure.
+        """
+        closed = []
+        for signal_hash, pos in list(self._positions.items()):
+            ticker = pos["ticker"]
+            try:
+                quote = self.fetcher.get_live_quote([ticker])
+                last = float(quote.iloc[0]["last_price"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("manage_positions: no quote for %s (%s)",
+                               ticker, e)
+                continue
+            sign = 1 if pos["direction"] == "LONG" else -1
+            ret = sign * (last / pos["entry_price"] - 1)
+            age_days = np.busday_count(
+                pos["entry_time"].date(),
+                datetime.now(timezone.utc).date())
+
+            reason = None
+            if ret <= self.STOP_LOSS_PCT:
+                reason = "STOP_LOSS"
+            elif ret >= self.TAKE_PROFIT_PCT:
+                reason = "TAKE_PROFIT"
+            elif age_days >= self.TIME_STOP_DAYS:
+                reason = "TIME_STOP"
+            if reason:
+                out = self.close_position(signal_hash, price=last,
+                                          exit_reason=reason)
+                if out:
+                    closed.append(out)
+        return closed
 
     def reconcile(self) -> dict:
         return {"open_positions": len(self._positions), "cash": round(self.cash, 2)}

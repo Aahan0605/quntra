@@ -92,6 +92,33 @@ class QuNtraBrain:
                 for r in rows
             ]
 
+    def get_recent_trades(self, days: int = 90) -> list[dict]:
+        """All closed trades from the last N calendar days, oldest first."""
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        with self._session() as s:
+            rows = s.execute(
+                select(Trade)
+                .where(Trade.created_at >= cutoff)
+                .order_by(Trade.created_at.asc())
+            ).scalars().all()
+            return [
+                {
+                    "id": r.id,
+                    "ticker": r.ticker,
+                    "direction": r.direction,
+                    "entry_price": float(r.entry_price) if r.entry_price else None,
+                    "exit_price": float(r.exit_price) if r.exit_price else None,
+                    "pnl": float(r.pnl) if r.pnl is not None else None,
+                    "entry_time": r.entry_time,
+                    "exit_time": r.exit_time,
+                    "signal_score": r.signal_score,
+                    "regime": r.regime,
+                    "is_paper": r.is_paper,
+                }
+                for r in rows
+            ]
+
     # ------------------------------------------------------------------ #
     # Agent credibility
 

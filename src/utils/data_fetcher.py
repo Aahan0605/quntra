@@ -2,19 +2,24 @@
 QuNtra UnifiedDataFetcher — single interface for all market data.
 
 Routing table:
-  NSE/BSE equity historical  -> jugaad-data
-  NSE live quotes            -> jugaad-data live
+  NSE/BSE equity historical  -> jugaad-data, falling back to yfinance .NS
+                                then local cache when NSE is unreachable
+  NSE live quotes            -> jugaad-data live, per-ticker yfinance fallback
   Options chain              -> Bharat-SM-Data (Derivatives.NSE)
   Fundamentals               -> Bharat-SM-Data (Fundamentals.MoneyControl)
   RBI series                 -> jugaad-data RBI
-  Global indices ONLY        -> yfinance (never for Indian equity)
+  Global indices             -> yfinance (primary source for these only)
   Offline fallback           -> data/cache/*.csv (fetch_data_cache.py)
+
+NSE's public API intermittently 503s non-browser clients (weekends
+especially), so every NSE call must degrade rather than raise.
 
 Every fetch can be validated with validate_data() -> DataQualityReport.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -23,6 +28,8 @@ import pandas as pd
 
 from src.utils.universe import nse_symbol
 from src.utils import cache_loader
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,14 +72,28 @@ class UnifiedDataFetcher:
                 pass
 
         if exchange == "NSE":
-            from jugaad_data.nse import stock_df
-            raw = stock_df(symbol=nse_symbol(ticker), from_date=start,
-                           to_date=end, series="EQ")
-            df = raw.rename(columns={
-                "DATE": "date", "OPEN": "open", "HIGH": "high",
-                "LOW": "low", "CLOSE": "close", "VOLUME": "volume",
-            })[["date", "open", "high", "low", "close", "volume"]]
-            return df.set_index("date").sort_index()
+            try:
+                from jugaad_data.nse import stock_df
+                raw = stock_df(symbol=nse_symbol(ticker), from_date=start,
+                               to_date=end, series="EQ")
+                df = raw.rename(columns={
+                    "DATE": "date", "OPEN": "open", "HIGH": "high",
+                    "LOW": "low", "CLOSE": "close", "VOLUME": "volume",
+                })[["date", "open", "high", "low", "close", "volume"]]
+                return df.set_index("date").sort_index()
+            except Exception as exc:  # NSE 503 / cookie rejection / schema drift
+                logger.warning("jugaad-data failed for %s (%s) — "
+                               "falling back to yfinance", ticker, exc)
+            df = self._yf_ohlc(ticker, start, end)
+            if df is not None and len(df):
+                return df
+            try:  # last resort: whatever the local cache holds
+                cached = cache_loader.load_ticker(ticker)
+                return cached.loc[str(start):str(end)]
+            except FileNotFoundError:
+                raise RuntimeError(
+                    f"All historical sources failed for {ticker} "
+                    f"(jugaad-data, yfinance, cache)")
 
         if exchange == "BSE":
             from jugaad_data.bse import bhavcopy_raw  # noqa: F401  (per-day bhavcopy)
@@ -85,38 +106,131 @@ class UnifiedDataFetcher:
     # Live quotes
 
     def get_live_quote(self, tickers: list[str]) -> pd.DataFrame:
-        """Live quotes via jugaad-data NSELive. Columns: ticker, last_price, ..."""
-        from jugaad_data.nse import NSELive
-        live = NSELive()
+        """Live quotes via jugaad-data NSELive, per-ticker yfinance fallback.
+
+        Columns: ticker, last_price, close, open, day_high, day_low,
+        prev_close, change_pct, timestamp, source. yfinance quotes are
+        delayed ~15 min — the 'source' column lets callers apply extra
+        caution (wider slippage assumptions) on fallback data.
+        """
+        live = None
+        try:
+            from jugaad_data.nse import NSELive
+            live = NSELive()
+        except Exception as exc:
+            logger.warning("NSELive unavailable (%s) — yfinance only", exc)
+
         rows = []
         for t in tickers:
-            q = live.stock_quote(nse_symbol(t))
-            p = q.get("priceInfo", {})
-            rows.append({
-                "ticker": t,
-                "last_price": p.get("lastPrice"),
-                "close": p.get("lastPrice"),
-                "open": p.get("open"),
-                "day_high": p.get("intraDayHighLow", {}).get("max"),
-                "day_low": p.get("intraDayHighLow", {}).get("min"),
-                "prev_close": p.get("previousClose"),
-                "change_pct": p.get("pChange"),
-                "timestamp": q.get("metadata", {}).get("lastUpdateTime"),
-            })
+            if live is not None:
+                try:
+                    q = live.stock_quote(nse_symbol(t))
+                    p = q.get("priceInfo", {})
+                    if p.get("lastPrice") is not None:
+                        rows.append({
+                            "ticker": t,
+                            "last_price": p.get("lastPrice"),
+                            "close": p.get("lastPrice"),
+                            "open": p.get("open"),
+                            "day_high": p.get("intraDayHighLow", {}).get("max"),
+                            "day_low": p.get("intraDayHighLow", {}).get("min"),
+                            "prev_close": p.get("previousClose"),
+                            "change_pct": p.get("pChange"),
+                            "timestamp": q.get("metadata", {}).get("lastUpdateTime"),
+                            "source": "nse_live",
+                        })
+                        continue
+                except Exception as exc:
+                    logger.warning("NSELive quote failed for %s (%s) — "
+                                   "trying yfinance", t, exc)
+            row = self._yf_quote(t)
+            if row is not None:
+                rows.append(row)
+            else:
+                logger.error("No quote available for %s from any source", t)
         return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------ #
+    # yfinance fallbacks (delayed data — acceptable when NSE is down)
+
+    @staticmethod
+    def _yf_symbol(ticker: str) -> str:
+        """Map to Yahoo notation: bare NSE symbols get the .NS suffix."""
+        if ticker.startswith("^") or "." in ticker or "=" in ticker:
+            return ticker
+        return f"{ticker}.NS"
+
+    def _yf_ohlc(self, ticker: str, start: date, end: date) -> pd.DataFrame | None:
+        """Daily OHLCV via yfinance, normalized to the jugaad schema."""
+        try:
+            import yfinance as yf
+            raw = yf.download(self._yf_symbol(ticker), start=str(start),
+                              end=str(end + timedelta(days=1)),
+                              progress=False, auto_adjust=True)
+            if raw is None or raw.empty:
+                return None
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            df = raw.rename(columns={
+                "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume",
+            })[["open", "high", "low", "close", "volume"]]
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df.index.name = "date"
+            return df.sort_index()
+        except Exception as exc:
+            logger.warning("yfinance OHLC failed for %s: %s", ticker, exc)
+            return None
+
+    def _yf_quote(self, ticker: str) -> dict | None:
+        """Delayed quote via yfinance fast_info."""
+        try:
+            import yfinance as yf
+            info = yf.Ticker(self._yf_symbol(ticker)).fast_info
+            last = info.get("lastPrice") if hasattr(info, "get") else info.last_price
+            prev = (info.get("previousClose") if hasattr(info, "get")
+                    else info.previous_close)
+            if last is None:
+                return None
+            return {
+                "ticker": ticker,
+                "last_price": float(last),
+                "close": float(last),
+                "open": info.get("open") if hasattr(info, "get") else info.open,
+                "day_high": info.get("dayHigh") if hasattr(info, "get") else info.day_high,
+                "day_low": info.get("dayLow") if hasattr(info, "get") else info.day_low,
+                "prev_close": prev,
+                "change_pct": (float(last) / float(prev) - 1) * 100 if prev else None,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "source": "yfinance_delayed",
+            }
+        except Exception as exc:
+            logger.warning("yfinance quote failed for %s: %s", ticker, exc)
+            return None
 
     # ------------------------------------------------------------------ #
     # Options chain
 
     def get_options_chain(self, underlying: str = "NIFTY",
-                          expiry: str | None = None) -> pd.DataFrame:
-        """Options chain via Bharat-SM-Data Derivatives (NSE)."""
-        from Derivatives import NSE
-        nse = NSE()
-        if expiry is None:
-            expiry = nse.get_expiry_dates(underlying)[0]
-        df = nse.get_option_chain(underlying, expiry)
-        return df
+                          expiry: datetime | None = None) -> pd.DataFrame:
+        """Options chain via Bharat-SM-Data Derivatives (NSE).
+
+        Returns an empty DataFrame when NSE blocks the client (frequent
+        403s outside market hours) — callers must handle len(df) == 0.
+        """
+        try:
+            from Derivatives import NSE
+            nse = NSE()
+            is_index = underlying.upper() in {"NIFTY", "BANKNIFTY", "FINNIFTY",
+                                              "MIDCPNIFTY", "NIFTYNXT50"}
+            if expiry is None:
+                expiry = nse.get_options_expiry(underlying, is_index=is_index)
+            return nse.get_option_chain(underlying, is_index=is_index,
+                                        expiry=expiry)
+        except Exception as exc:
+            logger.warning("Options chain unavailable for %s: %s",
+                           underlying, exc)
+            return pd.DataFrame()
 
     # ------------------------------------------------------------------ #
     # Fundamentals

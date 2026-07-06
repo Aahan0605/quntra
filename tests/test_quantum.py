@@ -4,6 +4,14 @@ import pytest
 import numpy as np
 import pandas as pd
 
+# importorskip only catches ImportError; qiskit >= 2 raises TypeError on
+# Python 3.10 (needs 3.11+ typing semantics), so guard against anything.
+try:
+    import qiskit  # noqa: F401
+except BaseException as _e:  # noqa: BLE001
+    pytest.skip(f"qiskit unusable in this runtime: {_e}",
+                allow_module_level=True)
+
 from src.quantum.problem_formulator import PortfolioQUBO
 from src.quantum.qaoa_circuit import QAOACircuit
 from src.quantum.qaoa_optimizer import QAOAOptimizer

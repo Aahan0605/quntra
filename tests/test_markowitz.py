@@ -12,6 +12,8 @@ import pandas as pd
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+pytest.importorskip("cvxpy", reason="optional optimizer dep — pip install cvxpy")
+
 from src.portfolio.markowitz import compute_stats, max_sharpe_portfolio, efficient_frontier
 
 TICKERS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",

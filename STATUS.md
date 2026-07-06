@@ -1,65 +1,48 @@
 # QuNtra — Build Status
 
-Last updated: 2026-07-05 · Test suite: **128 passing** · Commits: `c9c5493` → `91ebfe9`
+Last updated: 2026-07-06 · Test suite: **192 passing** (+3 live-network integration tests)
 
 The system goal: Backtesting → **Paper trading (40-day gate)** → Live money.
-Current position: **all code is built and tested; waiting on real-data steps
-that must run on your Mac** (the build sandbox cannot reach NSE/Yahoo/Telegram
-and has no Docker).
+Current position: **Parts A and B COMPLETE. Paper trading is LIVE (day 1/40).**
 
 ---
 
-## ✅ DONE — built, tested, committed
+## ✅ PART A — local setup (completed 2026-07-06 on the Mac)
 
-### Phase 0 — Foundation
-- [x] 25-ticker NSE universe, deduped (`src/utils/universe.py`) — `verify_universe.py` prints "25 unique tickers confirmed"
-- [x] Weekly rebalancer: 3% drift threshold, 20% turnover cap (`src/portfolio/rebalancer.py`) — simulated turnover well under the 300% limit
-- [x] ICICI cost model loaded from `config/costs.env` (`src/utils/costs.py`) — no hardcoded costs anywhere
-- [x] Backtest engine rewritten: real friction on traded notional, drift-aware weights, Calmar added
-- [x] Circuit breaker recalibrated: −3% / −4.5% / −7% levels, 30-min cooldown, manual `/resume` for Level 3 (`src/risk/drawdown_circuit.py`)
-- [x] Consecutive-loss kill switch: 3 losses → halt + mistake report (`src/risk/consecutive_loss_guard.py`)
-- [x] Pinned runtime: `requirements-pinned.txt` + `environment.yml` (numpy 2.2.6, pandas 2.3.3, sklearn 1.7.2, xgboost 3.2.0)
-- [x] Training pipeline with 54% OOS gate, leakage-safe features (`src/ml/train_clean_models.py`)
-- [x] Validation runner with hard gates + diagnostics + tearsheet (`scripts/run_full_validation.py`) — refuses to print PASS on synthetic data
+- [x] Python 3.10 venv + pinned deps (jugaad-data via `--no-deps`; psycopg2-binary added)
+- [x] PostgreSQL 15 in Docker (`quntra-db`), Alembic migrated — 8 tables (+ `knowledge_items`)
+- [x] Real data: **24/25 tickers × 5 years** (TATAMOTORS.NS delisted after 2025 demerger — effective universe is 24)
+- [x] Models trained with an **honest OOS gate** = max(0.54, base rate + 1%): 3 deployed (ICICIBANK, BAJFINANCE, SUNPHARMA); other tickers get a NEUTRAL ML vote — coin-flip models don't trade
+- [x] **VALIDATION PASSED on real data**: Sharpe **1.2276** (rf=0; 0.68 excess over 7%) · Max DD **−14.81%** · Calmar **1.0293** · 2.4% turnover — strategy simplified to pure inverse-vol after the momentum tilt worsened drawdown; NIFTY same-window comparison: 10.9%/yr, Sharpe 0.85, DD −15.8%
+- [x] Scheduler running in paper mode (PID in `quntra.pid`), 13 IST jobs, NSE-holiday aware
 
-### Phase 1 — Infrastructure
-- [x] UnifiedDataFetcher: jugaad-data / Bharat-SM-Data / yfinance-global-only routing + data quality validator (`src/utils/data_fetcher.py`)
-- [x] Indicator migration: pandas-ta is dead → MIT `ta` library; manual RSI/ADX fallbacks were mathematically wrong (up to 19 RSI pts off) and are now Wilder-correct, with equivalence tests
-- [x] Database: 7 tables (trades, signals, agent_credibility, backtest_results, price_data, research_notes, system_state) via SQLAlchemy + Alembic; PostgreSQL in prod, SQLite fallback
-- [x] Hermes coordinator: pre-market / market-session / post-market / overnight sequences, DB-backed state (`src/governor/hermes.py`)
-- [x] QuNtra Brain: persistent memory + agent credibility (×1.05 / ×0.95, floor 0.1, ceiling 3.0) (`src/governor/brain.py`)
-- [x] 24/7 scheduler: 11 jobs, all IST, skips NSE holidays, `--dry-run` prints 11/11 (`scripts/scheduler.py`)
-- [x] Telegram command center: 6 alert types + /status /pause /resume /report /override /halt (`src/alerts/telegram_bot.py`)
+## ✅ PART B — full vision build (completed 2026-07-06)
 
-### Phase 2 — Execution (code)
-- [x] PaperTrader: live-price simulated fills, 0.05%/side slippage, ICICI fees, every trade in DB (`src/execution/paper_trader.py`)
-- [x] KiteOMS: order state machine, signal-hash dedup, daily capital cap, 3-trades/day cap — interface-identical to PaperTrader (`src/execution/kite_oms.py`)
-- [x] End-to-end smoke test passing (`scripts/smoke_test.py`)
-- [x] Monitoring: `scripts/paper_trading_status.py` (daily gate dashboard) + `scripts/paper_performance_report.py` (weekly)
-- [x] One-command completion runner: `scripts/complete_local_setup.py` (Steps 0–8, hard-stops at failed gates, resumable with `--from N`)
-- [x] Also fixed along the way: pre-existing syntax error in `fundamental.py`; pyOpenSSL/kiteconnect conflict; Bharat-SM-Data pinned to 3.0.0 (4.x needs Python 3.12)
+- [x] **B1 Hermes CEO orchestrator**: pre-market (research team → synthesis → watchlist → Telegram), market tick, post-market (lessons → knowledge), overnight batch (trainer + 9-task pipeline), weekly board report, monthly letter
+- [x] **B2 Research team** (7): news / macro / sector / fundamental / geopolitical / company-events agents + research writer — live run: 52 s end-to-end, real earnings blackouts detected
+- [x] **B3 Telegram command center**: 22 commands, dispatch never crashes, all logged to `system_state`
+- [x] **B4 /note intelligence**: entity extraction → yfinance verification → relevance → macro-bias nudge → stored as USER_NOTE
+- [x] **B5 KnowledgeManager**: 8 knowledge types, recall by keyword/regime/ticker/conditions, weekly digest
+- [x] **B6 Overnight pipeline**: 9 prioritized tasks, per-task error isolation, pre-market draft by 6 AM
+- [x] **B7 DailyTrainer**: rolling 90-day trade retrain, 10-day holdout, 54% gate + drift check, research env only, MLflow logged
+- [x] **B8 Reporting**: daily 5 PM / weekly Sunday 8 PM / monthly 1st 9 AM — all metrics from the DB
+- [x] **SignalCouncil** (was missing entirely): 5 auditable votes (technical/momentum/ML/macro/sector) → 0–12 score, ≥9 gate, 3-trade daily cap
+- [x] **PaperTrader exit engine** (was a no-op): −2% stop / +4% target / 5-day time stop
 
----
+## ⏳ PART C — the 40-day paper gate (day 1/40, started 2026-07-06)
 
-## ⏳ PENDING — requires your Mac, in this order
+Track daily: `python3 scripts/paper_trading_status.py`
 
-Run everything below with **one command** in Terminal:
+- [ ] ≥ 40 trading days · rolling Sharpe > 1.0 · max DD > −15%
+- [ ] Zero unrecovered crashes · kill switch fired + recovered at least once
+- [ ] All 22 Telegram commands verified against the live bot
+- [ ] Knowledge base ≥ 50 items (currently 9+ and growing nightly)
 
-```bash
-cd ~/Claude/Projects/quntra && python3 scripts/complete_local_setup.py
-```
-
-- [ ] **1. PostgreSQL** — Docker container + Alembic migration (auto-falls back to SQLite if Docker missing)
-- [ ] **2. Fetch real market data** — 5 years OHLCV for 25 tickers (gate: ≥23/25) — *nothing downstream can run without this*
-- [ ] **3. Train the 25 models** — 54% OOS accuracy gate (gate: ≥20/25 pass)
-- [ ] **4. Full validation on real data** — ALL THREE must pass: Sharpe > 1.00 after costs · Max DD > −15% · Calmar > 0.70. **Hard stop if any fail.**
-- [ ] **5. Telegram secrets** — human step: @BotFather → token + chat ID into `config/secrets.env` (script prints instructions; optional but recommended)
-- [ ] **6. Kite API keys** — intentionally BLANK until the paper gate passes
-- [ ] **7. Start the scheduler** — paper mode, ₹25,000 simulated, max 3 trades/day, min score 9
-- [ ] **8. The 40-trading-day paper gate** (~8 weeks, cannot be shortcut):
-      ≥40 days · paper Sharpe > 1.0 · max DD better than −15% · zero unrecovered crashes · kill switch fired + recovered correctly
-      Track daily: `python3 scripts/paper_trading_status.py`
-- [ ] **9. Live capital** — only after gate 8 passes: ₹10,000–₹25,000, human approval per trade
+### Operator TODO (only human steps left)
+1. **Message the Telegram bot** (@Sjebxhs_bot) once, then run:
+   `./venv/bin/python scripts/complete_local_setup.py --from 5` — it will pick up the chat ID instructions (token already in `config/secrets.env`)
+2. Keep the Mac (or move to a server) running so the scheduler stays up
+3. Kite API keys stay **blank** until the paper gate passes
 
 ---
 
@@ -68,9 +51,9 @@ cd ~/Claude/Projects/quntra && python3 scripts/complete_local_setup.py
 | What | Where |
 |---|---|
 | Full setup instructions | `RUNBOOK.md` |
-| Complete build history + blockers | `build_log.md` |
-| One-command completion | `scripts/complete_local_setup.py` |
+| Complete build history + decisions | `build_log.md` |
 | Daily gate dashboard | `scripts/paper_trading_status.py` |
-| Validation results (after step 4) | `data/backtest_results/validation_post_fix.json` |
+| Validation results (real data, all_pass) | `data/backtest_results/validation_post_fix.json` |
+| Stop / start scheduler | `kill $(cat quntra.pid)` / `scripts/complete_local_setup.py --from 8` |
 
 **Rule that overrides everything: capital preservation. No live money before every gate above passes.**

@@ -84,11 +84,16 @@ def build_hermes() -> HermesCoordinator:
         from src.execution.kite_oms import KiteOMS
         trader = KiteOMS(brain=brain)
 
+    from src.governor.council import SignalCouncil
+    capital = float(os.environ.get("DAILY_CAPITAL_INR", "25000"))
+    council = SignalCouncil(capital=capital)
+
     return HermesCoordinator(
         brain=brain, trader=trader, fetcher=fetcher, telegram=telegram,
         circuit_breaker=DrawdownCircuitBreaker(),
         loss_guard=ConsecutiveLossGuard(brain=brain, telegram=telegram,
                                         oms=trader),
+        council=council,
     )
 
 
@@ -107,6 +112,10 @@ def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
          dict(hour=18, minute=0)),
         ("overnight_batch", hermes.run_overnight_batch, dict(hour=22, minute=0)),
         ("health_check", hermes.health_check, dict(hour=3, minute=0)),
+        ("weekly_board_report", hermes.generate_weekly_board_report,
+         dict(day_of_week="sun", hour=20, minute=0)),
+        ("monthly_letter", hermes.generate_monthly_investment_letter,
+         dict(day=1, hour=9, minute=0)),
     ]
     market_hour_jobs = {"pre_market", "arm_system", "observe_open",
                         "start_session", "market_loop", "close_mgmt",
@@ -128,7 +137,7 @@ def dry_run() -> int:
     scheduler = BlockingScheduler(timezone=IST)
     hermes = _Stub()
     ids = register_jobs(scheduler, hermes)
-    assert len(ids) == 11, f"expected 11 jobs, got {len(ids)}"
+    assert len(ids) == 13, f"expected 13 jobs, got {len(ids)}"
     for job in scheduler.get_jobs():
         nxt = job.trigger.get_next_fire_time(None, datetime.now(IST))
         assert nxt is not None, f"job {job.id} would never fire"
@@ -144,8 +153,8 @@ def dry_run() -> int:
     assert not is_trading_day(closed), "Republic Day should be closed"
     assert is_trading_day(open_day), "2026-07-03 should be a trading day"
     print("  holiday calendar OK (Republic Day closed, regular Friday open)")
-    print("DRY RUN PASSED — 11 jobs registered, IST-correct, holiday-aware")
-    print("--dry-run complete: 11/11 jobs passed")
+    print("DRY RUN PASSED — 13 jobs registered, IST-correct, holiday-aware")
+    print("--dry-run complete: 13/13 jobs passed")
     return 0
 
 

@@ -31,8 +31,21 @@ def load_ticker(ticker: str) -> pd.DataFrame:
 
 
 def load_close_panel(universe: list[str]) -> pd.DataFrame:
-    """Wide DataFrame of close prices: index=date, columns=tickers."""
-    frames = {t: load_ticker(t)["close"] for t in universe}
+    """Wide DataFrame of close prices: index=date, columns=tickers.
+
+    Tickers without a cache file are skipped (e.g. TATAMOTORS.NS after
+    its 2025 demerger delisting) — a single dead symbol must not take
+    down every consumer of the panel.
+    """
+    frames = {}
+    for t in universe:
+        try:
+            frames[t] = load_ticker(t)["close"]
+        except FileNotFoundError:
+            continue
+    if not frames:
+        raise FileNotFoundError(
+            "No cached tickers found. Run scripts/fetch_data_cache.py")
     panel = pd.DataFrame(frames).ffill().dropna()
     return panel
 

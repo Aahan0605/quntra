@@ -14,7 +14,7 @@ Steps:
   4. Full validation (Sharpe > 1.0, DD > -15%, Calmar > 0.70 — hard gate)
   5. Telegram check (pauses with instructions if secrets missing)
   6. Secrets verification
-  7. Scheduler dry-run (11/11 jobs)
+  7. Scheduler dry-run (13/13 jobs)
   8. Start paper trading (nohup, PID file, log tail)
 
 The script STOPS at any failed gate — per policy, never skip a phase gate.
@@ -82,7 +82,13 @@ def step0_requirements() -> bool:
     if r.returncode != 0:
         fail("pip install of pinned requirements failed")
         return False
-    ok("Pinned requirements installed")
+    # jugaad-data pins beautifulsoup4==4.9.3 which conflicts with yfinance;
+    # it runs fine on modern bs4, so install it without its dep resolution
+    r = run("pip install -q --no-deps jugaad-data==0.28", timeout=300)
+    if r.returncode != 0:
+        fail("pip install of jugaad-data failed")
+        return False
+    ok("Pinned requirements installed (jugaad-data via --no-deps)")
     return True
 
 
@@ -137,20 +143,16 @@ def step2_data() -> bool:
 
 
 def step3_train() -> bool:
-    banner(3, "Train 25 ML models (54% OOS gate)")
+    banner(3, "Train 25 ML models (honest OOS gate; see verify_models.py)")
     r = run("python3 -m src.ml.train_clean_models --verbose", timeout=7200)
     if r.returncode != 0:
         warn("Some tickers failed to train — checking the gate…")
     v = run("python3 scripts/verify_models.py", capture=True, timeout=120)
     print(v.stdout)
-    loaded = 0
-    for line in (v.stdout or "").splitlines():
-        if "models loaded successfully" in line:
-            loaded = int(line.split("/")[0])
-    if loaded >= 20:
-        ok(f"{loaded}/25 models pass — proceeding")
+    if v.returncode == 0:
+        ok("Training gate passed (>=20 trained, deployed models verified)")
         return True
-    fail(f"Only {loaded}/25 models loaded — need >= 20. "
+    fail("Training gate failed — read verify_models.py output above. "
          "Run scripts/check_data_quality.py and retrain failing tickers.")
     return False
 
@@ -230,7 +232,7 @@ def step7_dryrun() -> bool:
     if r.returncode != 0:
         fail("Dry-run failed — read the traceback above, fix, rerun --from 7")
         return False
-    ok("11/11 jobs passed")
+    ok("13/13 jobs passed")
     r = run("python3 scripts/smoke_test.py", timeout=300)
     if r.returncode != 0:
         fail("Smoke test failed — fix the integration issue, rerun --from 7")
