@@ -76,6 +76,20 @@ def test_signal_hash_is_one_per_ticker_per_day():
     assert sigs[0]["signal_hash"] == f"TCS.NS-{today}"
 
 
+def test_live_signals_rejects_earnings_blacklist():
+    from src.db import SystemState, get_session
+    with get_session() as s:
+        s.merge(SystemState(key="earnings_blacklist",
+                            value={"tickers": ["TCS.NS"]}))
+    council = SignalCouncil()
+    prices = pd.DataFrame({"close": [100.0] * 10})
+    with patch("src.utils.cache_loader.load_ticker", return_value=prices):
+        sigs = council.live_signals(["TCS.NS", "INFY.NS"])
+    tickers = [s["ticker"] for s in sigs]
+    assert "TCS.NS" not in tickers      # in earnings blackout
+    assert "INFY.NS" in tickers
+
+
 # --------------------------------------------------------------------- #
 # PaperTrader exit engine
 

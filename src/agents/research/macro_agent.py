@@ -17,7 +17,15 @@ MACRO_TICKERS = {
     "crude_oil": "CL=F",
     "gold": "GC=F",
     "usdinr": "USDINR=X",
+    "us_10y": "^TNX",
+    "vix": "^VIX",
+    "nikkei": "^N225",
+    "hang_seng": "^HSI",
 }
+
+# VIX is a level, not a %change — fetched separately
+VIX_FEAR = 25.0
+VIX_CALM = 15.0
 
 
 class MacroAgent(BaseResearchAgent):
@@ -33,9 +41,10 @@ class MacroAgent(BaseResearchAgent):
         moves: dict[str, float | None] = {
             name: yf_pct_change(tick) for name, tick in MACRO_TICKERS.items()
         }
+        vix_level = self._vix_level()
         fii_dii = self._fii_dii()
 
-        bias, reasons = self._compute_bias(moves, fii_dii)
+        bias, reasons = self._compute_bias(moves, fii_dii, vix_level)
         available = {k: v for k, v in moves.items() if v is not None}
         summary = (f"Macro bias: {bias}. " + "; ".join(reasons)
                    if reasons else f"Macro bias: {bias} (no strong signals)")
@@ -48,8 +57,33 @@ class MacroAgent(BaseResearchAgent):
             confidence=min(0.9, 0.15 * len(available)),
             sources=["yfinance"] + (["nse_fii_dii"] if fii_dii else []),
             reasoning="; ".join(reasons),
-            payload={"macro_bias": bias, "moves": moves, "fii_dii": fii_dii},
+            payload={"macro_bias": bias, "moves": moves, "fii_dii": fii_dii,
+                     "vix_level": vix_level,
+                     "us_direction": self._direction(moves, ("sp500",
+                                                             "nasdaq", "dow")),
+                     "asia_direction": self._direction(moves, ("nikkei",
+                                                               "hang_seng"))},
         )
+
+    @staticmethod
+    def _vix_level() -> float | None:
+        """VIX absolute level (a %change of a fear index is meaningless)."""
+        try:
+            import yfinance as yf
+            h = yf.Ticker("^VIX").history(period="2d")
+            if len(h):
+                return round(float(h["Close"].iloc[-1]), 2)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    @staticmethod
+    def _direction(moves: dict, keys: tuple) -> str:
+        vals = [moves.get(k) for k in keys if moves.get(k) is not None]
+        if not vals:
+            return "UNKNOWN"
+        avg = sum(vals) / len(vals)
+        return "UP" if avg > 0.3 else ("DOWN" if avg < -0.3 else "FLAT")
 
     def _fii_dii(self) -> dict | None:
         """FII/DII net flows via UnifiedDataFetcher, when available."""
@@ -64,10 +98,29 @@ class MacroAgent(BaseResearchAgent):
         return None
 
     @staticmethod
-    def _compute_bias(moves: dict, fii_dii: dict | None) -> tuple[str, list[str]]:
-        """Score the tape: US equities lead, oil is a headwind for India."""
+    def _compute_bias(moves: dict, fii_dii: dict | None,
+                      vix_level: float | None = None) -> tuple[str, list[str]]:
+        """Score the tape: US equities lead, oil is a headwind for India,
+        VIX extremes override mild equity signals."""
         score = 0.0
         reasons: list[str] = []
+
+        if vix_level is not None:
+            if vix_level > VIX_FEAR:
+                score -= 1
+                reasons.append(f"VIX elevated at {vix_level}")
+            elif vix_level < VIX_CALM:
+                score += 0.5
+                reasons.append(f"VIX calm at {vix_level}")
+
+        asia = [moves.get("nikkei"), moves.get("hang_seng")]
+        asia = [m for m in asia if m is not None]
+        if asia:
+            avg_asia = sum(asia) / len(asia)
+            if abs(avg_asia) > 0.5:
+                score += 0.5 if avg_asia > 0 else -0.5
+                reasons.append(f"Asia {'up' if avg_asia > 0 else 'down'} "
+                               f"{avg_asia:+.2f}%")
 
         us = [moves.get("sp500"), moves.get("nasdaq"), moves.get("dow")]
         us = [m for m in us if m is not None]

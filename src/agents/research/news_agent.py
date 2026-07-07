@@ -15,7 +15,10 @@ FEEDS = {
     "economic_times": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "moneycontrol": "https://www.moneycontrol.com/rss/marketsnews.xml",
     "business_standard": "https://www.business-standard.com/rss/markets-106.rss",
+    "livemint": "https://www.livemint.com/rss/markets",
 }
+
+MAX_AGE_HOURS = 18   # stale headlines must not steer today's bias
 
 POSITIVE_WORDS = {
     "surge", "rally", "gain", "jump", "record", "upgrade", "beat", "profit",
@@ -25,6 +28,12 @@ NEGATIVE_WORDS = {
     "fall", "drop", "crash", "plunge", "downgrade", "miss", "loss", "weak",
     "bearish", "sell", "underperform", "fraud", "probe", "default", "cuts",
 }
+# Phrases carry more signal than single words — weighted 2x
+POSITIVE_PHRASES = ["strong earnings", "beat estimates", "record revenue",
+                    "buy rating", "buyback", "new contract", "profit growth"]
+NEGATIVE_PHRASES = ["miss estimates", "sell rating", "regulatory action",
+                    "debt default", "under investigation", "layoffs",
+                    "guided lower"]
 
 # Company name fragments -> universe ticker (headline matching)
 COMPANY_KEYWORDS = {
@@ -46,10 +55,13 @@ MARKET_KEYWORDS = {"nifty", "sensex", "nse", "bse", "fii", "dii", "rbi",
 
 
 def score_sentiment(text: str) -> float:
-    """Keyword sentiment in [-1, 1]."""
-    words = set(text.lower().split())
-    pos = len(words & POSITIVE_WORDS)
-    neg = len(words & NEGATIVE_WORDS)
+    """Keyword + phrase sentiment in [-1, 1]. Phrases weigh double."""
+    low = text.lower()
+    words = set(low.split())
+    pos = len(words & POSITIVE_WORDS) \
+        + 2 * sum(1 for p in POSITIVE_PHRASES if p in low)
+    neg = len(words & NEGATIVE_WORDS) \
+        + 2 * sum(1 for p in NEGATIVE_PHRASES if p in low)
     if pos + neg == 0:
         return 0.0
     return round((pos - neg) / (pos + neg), 2)
@@ -79,13 +91,30 @@ class NewsAgent(BaseResearchAgent):
         self.feeds = feeds or FEEDS
 
     def run(self, context: dict) -> ResearchOutput:
+        import hashlib
+        from datetime import datetime, timedelta, timezone
+
         watchlist = context.get("watchlist") or []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
         items, sources_used = [], []
+        seen_titles: set[str] = set()
         for source, url in self.feeds.items():
             entries = fetch_rss(url, limit=25)
             if entries:
                 sources_used.append(source)
             for e in entries:
+                # Freshness: skip anything older than 18h (undated kept —
+                # most feeds date entries; dropping undated loses too much)
+                pub = e.get("published_dt")
+                if pub is not None and pub < cutoff:
+                    continue
+                # Cross-source dedup on normalized title
+                key = hashlib.md5(
+                    e["title"].lower().strip().encode()).hexdigest()
+                if key in seen_titles:
+                    continue
+                seen_titles.add(key)
+
                 text = f"{e['title']} {e['summary']}"
                 relevance, tickers = score_relevance(text, watchlist)
                 if relevance <= 0.5:

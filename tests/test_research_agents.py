@@ -101,6 +101,45 @@ def test_sentiment_and_relevance_helpers():
     assert score_sentiment("crash plunge loss fraud") < 0
     rel, tickers = score_relevance("tata steel expands capacity")
     assert rel > 0.5 and tickers == ["TATASTEEL.NS"]
+    # phrases outweigh single words
+    assert score_sentiment("company beat estimates despite weak quarter") > 0
+
+
+def test_news_agent_freshness_and_dedup(db_url):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(hours=30)
+    feed = [
+        {"title": "Reliance surges on record profit", "summary": "",
+         "link": "a", "published": "", "published_dt": now},
+        {"title": "Reliance surges on record profit", "summary": "",
+         "link": "b", "published": "", "published_dt": now},   # duplicate
+        {"title": "Infosys wins large deal, shares jump", "summary": "",
+         "link": "c", "published": "", "published_dt": stale},  # too old
+    ]
+    with patch("src.agents.research.news_agent.fetch_rss",
+               return_value=feed):
+        out = NewsAgent(db_url).run({})
+    titles = [f["title"] for f in out.findings]
+    # duplicate collapsed to one, stale item dropped
+    assert titles.count("Reliance surges on record profit") == 1
+    assert not any("Infosys" in t for t in titles)
+
+
+def test_company_agent_persists_blacklist(db_url):
+    from datetime import date
+    with patch.object(CompanyAnalysisAgent, "_events_for",
+                      side_effect=lambda t, d: (
+                          {"earnings_blackout": True,
+                           "earnings_date": "2026-07-09"}
+                          if t == "INFY.NS" else {})):
+        CompanyAnalysisAgent(db_url).run(
+            {"date": date(2026, 7, 7), "watchlist": ["INFY.NS", "TCS.NS"]})
+    from src.db import SystemState, get_session
+    with get_session(db_url) as s:
+        row = s.get(SystemState, "earnings_blacklist")
+        assert row is not None
+        assert row.value["tickers"] == ["INFY.NS"]
 
 
 # --------------------------------------------------------------------- #
@@ -108,21 +147,34 @@ def test_sentiment_and_relevance_helpers():
 
 def test_macro_agent_positive_bias(db_url):
     moves = {"sp500": 0.8, "nasdaq": 1.1, "dow": 0.5, "crude_oil": -2.0,
-             "gold": 0.1, "usdinr": -0.4}
+             "gold": 0.1, "usdinr": -0.4, "us_10y": 0.0,
+             "nikkei": 0.9, "hang_seng": 0.7, "vix": 0.0}
+    from src.agents.research.macro_agent import MACRO_TICKERS
+    symbol_to_name = {v: k for k, v in MACRO_TICKERS.items()}
     with patch("src.agents.research.macro_agent.yf_pct_change",
-               side_effect=lambda t, period="5d": moves[
-                   {v: k for k, v in
-                    __import__("src.agents.research.macro_agent",
-                               fromlist=["MACRO_TICKERS"]).MACRO_TICKERS.items()
-                    }[t]]):
+               side_effect=lambda t, period="5d":
+               moves.get(symbol_to_name.get(t), 0.0)), \
+         patch.object(MacroAgent, "_vix_level", return_value=13.5):
         out = MacroAgent(db_url).run({})
     assert out.payload["macro_bias"] == "POSITIVE"
     assert "US equities up" in out.reasoning
+    assert out.payload["asia_direction"] == "UP"
+    assert "VIX calm" in out.reasoning
+
+
+def test_macro_agent_vix_fear_drags_bias(db_url):
+    with patch("src.agents.research.macro_agent.yf_pct_change",
+               return_value=None), \
+         patch.object(MacroAgent, "_vix_level", return_value=31.0):
+        out = MacroAgent(db_url).run({})
+    assert out.payload["macro_bias"] == "NEGATIVE"
+    assert "VIX elevated" in out.reasoning
 
 
 def test_macro_agent_all_sources_down(db_url):
     with patch("src.agents.research.macro_agent.yf_pct_change",
-               return_value=None):
+               return_value=None), \
+         patch.object(MacroAgent, "_vix_level", return_value=None):
         out = MacroAgent(db_url).run({})
     assert out.payload["macro_bias"] == "NEUTRAL"
     assert out.confidence == 0.0

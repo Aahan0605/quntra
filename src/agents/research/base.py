@@ -87,17 +87,30 @@ class BaseResearchAgent:
 
 
 def fetch_rss(url: str, limit: int = 30) -> list[dict]:
-    """Fetch and normalize an RSS feed. Returns [] on any failure."""
+    """Fetch and normalize an RSS feed. Returns [] on any failure.
+
+    published_dt is a datetime when the feed provides a parseable
+    timestamp, else None — callers use it for freshness filtering.
+    """
     try:
         import feedparser
         parsed = feedparser.parse(url)
         out = []
         for e in (parsed.entries or [])[:limit]:
+            published_dt = None
+            struct = (getattr(e, "published_parsed", None)
+                      or getattr(e, "updated_parsed", None))
+            if struct is not None:
+                try:
+                    published_dt = datetime(*struct[:6], tzinfo=timezone.utc)
+                except Exception:  # noqa: BLE001
+                    pass
             out.append({
                 "title": getattr(e, "title", ""),
                 "summary": getattr(e, "summary", "")[:500],
                 "link": getattr(e, "link", ""),
                 "published": getattr(e, "published", ""),
+                "published_dt": published_dt,
             })
         return out
     except Exception as e:  # noqa: BLE001

@@ -155,7 +155,17 @@ class SignalCouncil:
 
     def live_signals(self, watchlist: list[str]) -> list[dict]:
         """Executable signals for watchlist tickers, respecting the
-        daily trade cap. Long-only; qty sized as capital/3 per position."""
+        daily trade cap. Long-only; qty sized as capital/3 per position.
+
+        Earnings-blacklisted tickers are dropped defensively here too —
+        Hermes already filters them from the watchlist, but reading the
+        persisted system_state['earnings_blacklist'] means a signal never
+        fires into a company's results even if the watchlist path is
+        bypassed."""
+        if not watchlist:
+            return []
+        blacklist = set(self._earnings_blacklist())
+        watchlist = [t for t in watchlist if t not in blacklist]
         if not watchlist:
             return []
         today = datetime.now(timezone.utc).date().isoformat()
@@ -186,6 +196,17 @@ class SignalCouncil:
             })
         self._trades_today[today] = used + len(signals)
         return signals
+
+    def _earnings_blacklist(self) -> list[str]:
+        """Tickers in an earnings blackout, from CompanyAnalysisAgent's
+        persisted system_state entry. Empty on any read failure."""
+        try:
+            from src.db import SystemState, get_session
+            with get_session(self.db_url) as s:
+                row = s.get(SystemState, "earnings_blacklist")
+                return (row.value or {}).get("tickers", []) if row else []
+        except Exception:  # noqa: BLE001
+            return []
 
     def score_day(self) -> list[tuple[str, bool]]:
         """Score voters against today's realized market direction."""

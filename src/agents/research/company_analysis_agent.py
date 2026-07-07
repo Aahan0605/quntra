@@ -40,6 +40,7 @@ class CompanyAnalysisAgent(BaseResearchAgent):
                 flags.append({"ticker": ticker, **events})
 
         blocked = [f["ticker"] for f in flags if f.get("earnings_blackout")]
+        self._persist_blacklist(blocked, today)
         summary = (f"Corporate events: {len(flags)} of {checked} tickers "
                    f"flagged; earnings blackout: {blocked or 'none'}")
         return ResearchOutput(
@@ -53,6 +54,20 @@ class CompanyAnalysisAgent(BaseResearchAgent):
             payload={"event_flags": {f["ticker"]: f for f in flags},
                      "earnings_blackout": blocked},
         )
+
+    def _persist_blacklist(self, blocked: list[str], today: date) -> None:
+        """system_state['earnings_blacklist'] — a stable key any consumer
+        (council, briefing, dashboards) can read without re-running the
+        agent. Hermes also filters the watchlist from our payload."""
+        try:
+            from src.db import SystemState, get_session
+            with get_session(self.db_url) as s:
+                s.merge(SystemState(key="earnings_blacklist", value={
+                    "tickers": blocked,
+                    "updated_at": today.isoformat(),
+                }))
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            pass
 
     def _events_for(self, ticker: str, today: date) -> dict:
         """Event flags for one ticker; {} when nothing within windows."""

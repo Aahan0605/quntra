@@ -226,3 +226,35 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   Gap 10 (knowledge digest push): covered — the Sunday board report
   embeds generate_knowledge_digest and is pushed via Telegram.
 - [DONE] Q: 220 tests passing (was 192); all offline.
+
+## v4.1 build window (2026-07-07) — alongside the live paper gate
+
+- CONSTRAINT HONORED: none of the frozen paper-trading files changed
+  (paper_trader, drawdown_circuit, consecutive_loss_guard, rebalancer,
+  costs.py/env, scheduler.py existing jobs, hermes.py existing methods).
+  Verified via git diff --stat HEAD before commit. data/models/ (production)
+  untouched — the sweep writes only to data/models_research/.
+- [DONE] A1: infra/ deployment package — deploy_aws.sh (ap-south-1, dynamic
+  Ubuntu 22.04 AMI lookup, elastic IP, restricted SG), ec2_userdata.sh
+  (IST tz, systemd unit, --dry-run), sync_to_ec2.sh, start_quntra.sh
+  (watchdog-based). All bash -n clean; dry-run verified.
+- [DONE] M1: diagnostic — 3/24 pass honest gate, 8/24 beat base rate,
+  avg OOS 0.4963 vs avg base 0.5523. Daily technicals carry little edge.
+- [DONE] M2: src/ml/research/ (improved_features 27 features shift(1)
+  anti-leakage + benchmark-relative; 5 model candidates) +
+  scripts/research_model_sweep.py (purge gap, honest+flat gates, false-
+  positive caveat, asserts production dir unchanged). Ran: 9/24 flat-pass,
+  8/24 honest-pass across 120 trials (~6 expected false positives).
+- [DONE] R1-R3: research agents already used real feeds/yfinance (not
+  mocked — built in Part B). Upgrades this session: NewsAgent +Livemint,
+  18h freshness filter, cross-source title dedup, phrase-weighted
+  sentiment. MacroAgent +US10Y/VIX/Nikkei/HangSeng + VIX-level bias +
+  asia direction. CompanyAnalysisAgent persists
+  system_state['earnings_blacklist']; SignalCouncil.live_signals now
+  reads it defensively (Hermes watchlist filter already excludes them).
+- [DONE] C1: /chat wired to Claude — ResearchWriter.answer_question routes
+  to claude-haiku-4-5 (grounded with regime/macro/watchlist/memory) when
+  ANTHROPIC_API_KEY is set, else deterministic memory recall. Never raises,
+  never blocks the bot. Tests fully mock anthropic (no real calls).
+- [DONE] Q: 229 tests passing (was 192 at gate start); RUNBOOK v4.1
+  sections (AWS, sweep, /chat, token rotation, daily monitoring); tagged.

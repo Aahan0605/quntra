@@ -82,16 +82,87 @@ class ResearchWriter(BaseResearchAgent):
         return ResearchOutput(agent=self.name, summary=report, confidence=0.7)
 
     def answer_question(self, question: str, context: dict | None = None) -> str:
-        """Freeform Q&A: organizational memory + recent research + state.
+        """Freeform Q&A for the /chat command.
 
-        Deterministic synthesis (no LLM): recalls matching knowledge items
-        and research notes, then frames them with the current context.
+        Router: when ANTHROPIC_API_KEY is set, ground a Claude call with the
+        current system state and memory recall. Otherwise (and on any API
+        failure) fall back to the deterministic memory-recall answer, so the
+        command always works offline and never crashes the bot.
         """
+        import os
         context = context or {}
-        parts: list[str] = []
+        grounding = self._gather_grounding(question, context)
 
+        if os.getenv("ANTHROPIC_API_KEY"):
+            answer = self._answer_via_claude(question, grounding)
+            if answer is not None:
+                return answer
+        return self._answer_from_memory(question, context, grounding)
+
+    def _answer_via_claude(self, question: str, grounding: dict) -> str | None:
+        """Claude-backed answer. Returns None on any failure so the caller
+        falls back to the deterministic path."""
+        import os
+        try:
+            import anthropic
+        except ImportError:
+            return None
+        system_prompt = (
+            "You are QuNtra, an AI quantitative research analyst for Indian "
+            "equity markets (NSE/BSE), running in PAPER-TRADING mode with no "
+            "live capital deployed.\n\n"
+            f"Current context:\n"
+            f"- Market regime: {grounding['regime']}\n"
+            f"- Macro bias: {grounding['macro_bias']}\n"
+            f"- Watchlist size: {grounding['watchlist_size']} tickers\n"
+            f"- Paper gate: day {grounding['paper_day']}/40\n"
+            f"- Deployed ML models: ICICIBANK, BAJFINANCE, SUNPHARMA "
+            f"(other tickers get a neutral vote)\n\n"
+            "Relevant memory:\n" + (grounding["memory_text"] or "(none yet)")
+            + "\n\nAnswer concisely and factually. If you don't know, say so. "
+            "Provide research analysis only — never personalized financial "
+            "advice. Keep responses under 300 words."
+        )
+        try:
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            resp = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=600,
+                system=system_prompt,
+                messages=[{"role": "user", "content": question}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), "")
+            return f"🤖 {text}" if text else None
+        except Exception as e:  # noqa: BLE001 — degrade to memory recall
+            logger = __import__("logging").getLogger("quntra.research")
+            logger.warning("Claude /chat call failed, using memory: %s", e)
+            return None
+
+    def _gather_grounding(self, question: str, context: dict) -> dict:
+        """Shared context for both the Claude and deterministic paths."""
         from src.knowledge import KnowledgeManager
         hits = KnowledgeManager(self.db_url).recall(question, limit=4)
+        regime = context.get("regime") or {}
+        regime_state = (regime.get("state") or regime.get("current")
+                        if isinstance(regime, dict) else regime) or "UNKNOWN"
+        watchlist = context.get("watchlist") or {}
+        wl_size = (len(watchlist.get("tickers", [])) if isinstance(watchlist, dict)
+                   else len(watchlist) if isinstance(watchlist, list) else 0)
+        return {
+            "hits": hits,
+            "regime": regime_state,
+            "macro_bias": context.get("macro_bias", "neutral"),
+            "watchlist_size": wl_size,
+            "paper_day": context.get("paper_day", "?"),
+            "memory_text": "\n".join(
+                f"- [{h['knowledge_type']}] {h['content'][:200]}" for h in hits),
+        }
+
+    def _answer_from_memory(self, question: str, context: dict,
+                            grounding: dict) -> str:
+        """Deterministic synthesis: memory + recent research + regime."""
+        parts: list[str] = []
+        hits = grounding["hits"]
         if hits:
             parts.append("From QuNtra's memory:")
             parts += [f"• [{h['knowledge_type']}] {h['content'][:160]}"
@@ -117,10 +188,7 @@ class ResearchWriter(BaseResearchAgent):
         except Exception:  # noqa: BLE001
             pass
 
-        regime = (context.get("regime") or {})
-        regime_state = (regime.get("state") or regime.get("current")
-                        if isinstance(regime, dict) else regime) or "UNKNOWN"
-        parts.append(f"Current regime: {regime_state}.")
+        parts.append(f"Current regime: {grounding['regime']}.")
         if not hits:
             parts.append("Nothing specific in memory yet — the knowledge "
                          "base grows with every trading day. Try /research "
