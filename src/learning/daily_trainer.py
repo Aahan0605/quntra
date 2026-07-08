@@ -227,8 +227,14 @@ class DailyTrainer:
     def log_to_mlflow(self, acc: float, baseline: float, n: int,
                       deployed: bool) -> None:
         try:
+            import os
+
             import mlflow
-            mlflow.set_tracking_uri(f"file:{ROOT / 'data' / 'mlruns'}")
+            # Respect MLFLOW_TRACKING_URI when set; else a local SQLite DB.
+            # (Recent MLflow deprecated the plain-file backend.)
+            uri = os.getenv("MLFLOW_TRACKING_URI") \
+                or f"sqlite:///{ROOT / 'data' / 'mlflow.db'}"
+            mlflow.set_tracking_uri(uri)
             mlflow.set_experiment("quntra_daily_trainer")
             with mlflow.start_run():
                 mlflow.log_metrics({"holdout_accuracy": acc,

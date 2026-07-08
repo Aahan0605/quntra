@@ -258,3 +258,27 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   never blocks the bot. Tests fully mock anthropic (no real calls).
 - [DONE] Q: 229 tests passing (was 192 at gate start); RUNBOOK v4.1
   sections (AWS, sweep, /chat, token rotation, daily monitoring); tagged.
+
+## Credentials/config session (2026-07-08)
+
+- [DONE] MLflow: NOT an API key — it's an experiment-log store URI. Recent
+  MLflow deprecated the plain-file backend, so set MLFLOW_TRACKING_URI to a
+  local SQLite DB (data/mlflow.db); DailyTrainer now reads the env var with
+  a SQLite fallback. Verified: logs runs locally, no account/server.
+- [DONE] IBM Quantum: the QAOA optimizer runs on the local Aer simulator and
+  never calls IBM hardware — so no key is required for the system to work.
+  Built src/quantum/ibm_provider.py: verifies IBM_QUANTUM_API_KEY against the
+  QSA /versions endpoint (401 on bad token) when IBM_QUANTUM_QSA_URL is set,
+  latest_version() reads the public /version endpoint (handles its
+  double-encoded body), everything degrades to the simulator. A missing/bad
+  optional key never hard-fails verify_connections.
+- [DONE] Kite: access token can't be pre-filled — it's regenerated daily via
+  the login flow and expires ~07:30 IST. Built scripts/kite_login.py
+  (--login-url, --request-token) to mint today's token into secrets.env for
+  LATER. Live trading stays gated behind the 40-day paper gate; the helper
+  says so and refuses without KITE_API_KEY.
+- FLAGGED: KITE_API_KEY and KITE_API_SECRET are both empty in secrets.env
+  (not just the access token) — the user believed these were saved.
+- verify_connections now reports MLflow + IBM Quantum alongside the rest:
+  PostgreSQL/Telegram/MLflow all green; Kite + IBM correctly SKIPPED.
+- 235 tests passing; frozen paper-trading files untouched.

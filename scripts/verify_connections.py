@@ -87,6 +87,36 @@ def main() -> int:
         results["NSE data"] = ("UNREACHABLE — fine outside market hours / "
                                "sandbox; required on the trading machine")
 
+    # MLflow (local experiment tracking — no account, just a store URI)
+    ml_uri = os.getenv("MLFLOW_TRACKING_URI", "")
+    if not ml_uri:
+        results["MLflow"] = ("DEFAULT ✓ (local SQLite — set "
+                             "MLFLOW_TRACKING_URI to override)")
+    else:
+        try:
+            import mlflow
+            mlflow.set_tracking_uri(ml_uri)
+            mlflow.search_experiments()  # touches the store
+            results["MLflow"] = f"OK ✓ ({ml_uri.split('://')[0]} store)"
+        except Exception as e:  # noqa: BLE001
+            results["MLflow"] = f"FAILED: {str(e)[:80]}"
+            hard_fail = True
+
+    # IBM Quantum (OPTIONAL — QAOA runs on the local simulator without it,
+    # so a missing/bad key never hard-fails)
+    try:
+        from src.quantum.ibm_provider import verify as ibm_verify
+        st = ibm_verify()
+        if not st.configured:
+            results["IBM Quantum"] = "SKIPPED (optional — local simulator)"
+        elif st.connected:
+            results["IBM Quantum"] = f"CONNECTED ✓ ({st.detail})"
+        else:
+            results["IBM Quantum"] = (f"CONFIGURED but {st.detail} "
+                                      f"(falls back to simulator)")
+    except Exception as e:  # noqa: BLE001
+        results["IBM Quantum"] = f"SKIPPED (check unavailable: {e})"
+
     print("\nConnection verification:")
     for k, v in results.items():
         print(f"  {k:12s}: {v}")
