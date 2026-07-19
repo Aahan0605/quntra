@@ -389,6 +389,24 @@ class HermesCoordinator:
         return msg
 
     # ------------------------------------------------------------------ #
+    # Gate completion — the full day-by-day history, sent once the 40-day
+    # mark is first reached (pass OR fail; the operator needs to see both).
+
+    def check_gate_completion(self) -> bool:
+        """Called daily after EOD. Sends the report exactly once, tracked
+        via system_state so a scheduler restart can't duplicate it."""
+        from src.reporting import GateCompletionReport
+        return GateCompletionReport(self.db_url, telegram=self.telegram) \
+            .send_if_gate_reached()
+
+    def generate_gate_report_now(self) -> str:
+        """On-demand full history — /gate_report can be run any day,
+        including before the 40-day mark, to see progress so far."""
+        from src.reporting import GateCompletionReport
+        report = GateCompletionReport(self.db_url, telegram=None).generate()
+        return report or "No paper trades recorded yet."
+
+    # ------------------------------------------------------------------ #
     # Scheduler hook points (thin wrappers so cron jobs stay 1-liners)
 
     def arm_system(self):

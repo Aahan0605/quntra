@@ -282,3 +282,31 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 - verify_connections now reports MLflow + IBM Quantum alongside the rest:
   PostgreSQL/Telegram/MLflow all green; Kite + IBM correctly SKIPPED.
 - 235 tests passing; frozen paper-trading files untouched.
+
+## Gate-completion Telegram report (2026-07-19)
+
+- User request: send the full day-by-day paper trading history via Telegram
+  once the 40-day gate finishes, without needing to be asked again.
+- [DONE] src/reporting/gate_completion_report.py: GateCompletionReport.
+  Reuses scripts.paper_trading_status.gather_stats() (same Sharpe rf=0/DD/
+  gate logic as /paper_progress, so numbers can't disagree). generate()
+  produces the full report (gate result + day-by-day P&L log);
+  send_if_gate_reached() sends it via Telegram exactly once, tracked in
+  system_state['gate_completion_report_sent'] so a scheduler restart can't
+  duplicate the send.
+- [DONE] Hermes: two new ADDITIVE methods (zero existing lines touched) —
+  check_gate_completion() (daily cron target) and generate_gate_report_now()
+  (on-demand, works before day 40 too).
+- [DONE] scripts/scheduler.py: one new job, gate_completion_check, daily
+  17:10 IST, NOT gated by trading_day_only (it only reads the DB and
+  no-ops until day 40, so it's safe to run every day incl. weekends).
+  14 -> 15 jobs; only lines removed were the dry-run count assertions
+  (14->15) — verified via git diff that no existing job/line was altered.
+- [DONE] /gate_report Telegram command — full history any time, and it's
+  what auto-fires the day the gate completes. 30 -> 31 commands.
+- [DONE] 8 new tests (gate report generation, idempotent auto-send, Hermes
+  wiring, Telegram command) + 1 existing test updated for the new command
+  count. 243 tests total passing.
+- Verified: hermes.py diff is 100% additive (0 lines removed);
+  paper_trader/drawdown_circuit/consecutive_loss_guard/rebalancer/
+  costs.py/costs.env completely untouched this session.

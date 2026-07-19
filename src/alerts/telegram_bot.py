@@ -201,6 +201,7 @@ Your AI quantitative research organization
 /trades — Today's executed trades with P&L and exit reasons
 /signals — All signals generated today (executed + rejected)
 /paper_progress — Paper trading gate status (X/40 days)
+/gate_report — Full day-by-day trading history (auto-sent at day 40)
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 PERFORMANCE
@@ -697,6 +698,11 @@ class QuNtraTelegramBot:
         )
         return r.stdout.strip() or f"status script failed: {r.stderr[:200]}"
 
+    def cmd_gate_report(self) -> str:
+        """Full day-by-day paper trading history, on demand — works any
+        day (not just after the 40-day mark is reached)."""
+        return self.hermes.generate_gate_report_now()
+
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""
         from src.reporting import metrics as M
@@ -763,6 +769,8 @@ class QuNtraTelegramBot:
         # v4.0: discovery + today views
         "help", "start", "trades", "signals", "regime", "paper_progress",
         "macro", "positions",
+        # gate completion: full day-by-day history, on demand or auto-sent
+        "gate_report",
     ]
 
     def run_polling(self):
