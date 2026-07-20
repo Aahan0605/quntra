@@ -351,3 +351,28 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   scripts/kite_login.py --login-url  ->  log in  ->  --request-token <T>.
   Until then paper trading continues on yfinance_delayed (fine for a
   multi-day-hold strategy).
+
+## Kite token expiry reminder (2026-07-20)
+
+- User completed the Kite login (valid access token now in secrets), but
+  the account lacks the paid market-data subscription — ltp/quote return
+  PermissionException, so real-time quotes stay unavailable and the fetcher
+  correctly stays on yfinance_delayed. The Kite path activates automatically
+  if/when the data subscription is added.
+- [DONE] src/integrations/kite_session.py: token_status() — checks the
+  stored token with kite.profile() (works on basic permissions). Returns
+  not_configured/valid/expired; treats PermissionException as 'valid' (the
+  token authenticates, the account merely lacks that endpoint).
+- [DONE] Hermes.check_kite_token() (additive) + scheduler job
+  kite_token_check daily 07:45 IST (16->17 jobs): pings Telegram with
+  re-login instructions ONLY when the token is expired; silent otherwise,
+  so it never nags during pure paper trading.
+- NOTE on "more trades": the 3-trades/day cap is a deliberate, validated
+  risk control (Phase-0 backtest ran at ~2.4% annual turnover with this
+  limit). It is NOT raised — doing so mid-gate would change the very system
+  the 40-day gate is validating, and ~₹22.7k of ₹25k was already deployed
+  by today's 3 fills. The system already took its maximum for the day.
+- Data persistence confirmed: trades/signals/research_notes all durably in
+  Postgres (today: 3 trades with full detail — ticker, dir, qty, entry,
+  score, signal_hash — the exact record needed for future live-trading
+  analysis). 260 tests passing; frozen files untouched.

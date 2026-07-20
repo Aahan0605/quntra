@@ -128,6 +128,10 @@ def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
         # day's trades and reports have settled. Read-only; runs daily
         # (weekends too) so the vault's report archive stays current.
         ("obsidian_sync", hermes.sync_obsidian, dict(hour=17, minute=20)),
+        # Kite tokens expire ~07:30 IST daily — check just after and ping
+        # the operator if a re-login is needed. Every day; no-op alert when
+        # Kite isn't configured, so it never nags during pure paper trading.
+        ("kite_token_check", hermes.check_kite_token, dict(hour=7, minute=45)),
     ]
     market_hour_jobs = {"pre_market", "arm_system", "observe_open",
                         "start_session", "market_loop", "close_mgmt",
@@ -149,7 +153,7 @@ def dry_run() -> int:
     scheduler = BlockingScheduler(timezone=IST)
     hermes = _Stub()
     ids = register_jobs(scheduler, hermes)
-    assert len(ids) == 16, f"expected 16 jobs, got {len(ids)}"
+    assert len(ids) == 17, f"expected 17 jobs, got {len(ids)}"
     for job in scheduler.get_jobs():
         nxt = job.trigger.get_next_fire_time(None, datetime.now(IST))
         assert nxt is not None, f"job {job.id} would never fire"
@@ -165,8 +169,8 @@ def dry_run() -> int:
     assert not is_trading_day(closed), "Republic Day should be closed"
     assert is_trading_day(open_day), "2026-07-03 should be a trading day"
     print("  holiday calendar OK (Republic Day closed, regular Friday open)")
-    print("DRY RUN PASSED — 16 jobs registered, IST-correct, holiday-aware")
-    print("--dry-run complete: 16/16 jobs passed")
+    print("DRY RUN PASSED — 17 jobs registered, IST-correct, holiday-aware")
+    print("--dry-run complete: 17/17 jobs passed")
     return 0
 
 

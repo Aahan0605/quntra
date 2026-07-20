@@ -419,6 +419,23 @@ class HermesCoordinator:
             logger.exception("Obsidian sync failed")
             return {"error": str(e)}
 
+    def check_kite_token(self) -> str:
+        """Morning check: Kite access tokens expire ~07:30 IST daily. Alert
+        the operator on Telegram if a re-login is needed. No-ops (no alert)
+        when Kite isn't configured, so it's harmless during paper trading."""
+        from src.integrations.kite_session import token_status
+        status = token_status()
+        if status == "expired" and self.telegram is not None:
+            self.telegram.send(
+                "🔑 Kite access token EXPIRED (they reset ~07:30 IST daily).\n"
+                "Real-time quotes are on delayed yfinance until you refresh:\n"
+                "  python3 scripts/kite_login.py --login-url\n"
+                "then log in and run --request-token <token>.\n"
+                "(Paper trading keeps running on delayed data meanwhile.)")
+        elif status.startswith("error") and self.telegram is not None:
+            logger.warning("Kite token check: %s", status)
+        return status
+
     # ------------------------------------------------------------------ #
     # Scheduler hook points (thin wrappers so cron jobs stay 1-liners)
 
