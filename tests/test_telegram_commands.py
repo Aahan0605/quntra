@@ -55,8 +55,8 @@ def bot(tmp_path, monkeypatch):
     monkeypatch.setattr(db_session, "_SessionLocal", None)
 
 
-def test_all_31_commands_registered(bot):
-    assert len(bot.COMMANDS) == 31
+def test_all_32_commands_registered(bot):
+    assert len(bot.COMMANDS) == 32
     for name in bot.COMMANDS:
         assert callable(getattr(bot, f"cmd_{name}", None)), \
             f"cmd_{name} missing"

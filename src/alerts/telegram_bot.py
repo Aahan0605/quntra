@@ -202,6 +202,7 @@ Your AI quantitative research organization
 /signals — All signals generated today (executed + rejected)
 /paper_progress — Paper trading gate status (X/40 days)
 /gate_report — Full day-by-day trading history (auto-sent at day 40)
+/obsidian — Regenerate the Obsidian knowledge vault from the database
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 PERFORMANCE
@@ -703,6 +704,17 @@ class QuNtraTelegramBot:
         day (not just after the 40-day mark is reached)."""
         return self.hermes.generate_gate_report_now()
 
+    def cmd_obsidian(self) -> str:
+        """Regenerate the Obsidian markdown vault from the database."""
+        r = self.hermes.sync_obsidian()
+        if "error" in r:
+            return f"⚠️ Obsidian sync failed: {r['error']}"
+        return ("🗂 Obsidian vault synced\n"
+                f"  {r['daily']} daily notes · {r['tickers']} tickers · "
+                f"{r['reports']} reports · {r['knowledge']} knowledge sets\n"
+                f"  {r['vault']}\n"
+                "Open that folder in Obsidian: Open folder as vault.")
+
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""
         from src.reporting import metrics as M
@@ -771,6 +783,8 @@ class QuNtraTelegramBot:
         "macro", "positions",
         # gate completion: full day-by-day history, on demand or auto-sent
         "gate_report",
+        # obsidian: regenerate the markdown vault from the DB
+        "obsidian",
     ]
 
     def run_polling(self):

@@ -91,13 +91,60 @@ def start_service(name: str) -> bool:
     return True
 
 
+DB_CONTAINER = "quntra-db"
+
+
+def ensure_database() -> str:
+    """Keep the Postgres container up whenever Docker is available.
+
+    Returns a short status string. The scheduler uses Postgres by default;
+    a stopped container (common after a Mac reboot if Docker auto-starts
+    but the container doesn't) silently breaks every DB write, so the
+    watchdog restarts it. If Docker itself is down, we can't fix it from
+    here — surface it once so the operator knows.
+    """
+    if not shutil_which("docker"):
+        return "docker-absent"
+    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+        return "docker-daemon-down"
+    running = subprocess.run(
+        ["docker", "ps", "--filter", f"name={DB_CONTAINER}",
+         "--format", "{{.Names}}"], capture_output=True, text=True).stdout
+    if DB_CONTAINER in running:
+        return "ok"
+    exists = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name={DB_CONTAINER}",
+         "--format", "{{.Names}}"], capture_output=True, text=True).stdout
+    if DB_CONTAINER in exists:
+        subprocess.run(["docker", "start", DB_CONTAINER], capture_output=True)
+        logger.warning("%s was stopped — restarted it", DB_CONTAINER)
+        return "restarted"
+    return "container-missing"
+
+
+def shutil_which(cmd: str) -> str | None:
+    import shutil
+    return shutil.which(cmd)
+
+
 def main() -> int:
     restarts: dict[str, list[datetime]] = {n: [] for n in SERVICES}
     alerted: set[str] = set()
-    logger.info("Watchdog up — monitoring %s every %ds",
-                ", ".join(SERVICES), CHECK_SECS)
+    logger.info("Watchdog up — monitoring %s + %s every %ds",
+                ", ".join(SERVICES), DB_CONTAINER, CHECK_SECS)
     while True:
         reap_children()
+        db = ensure_database()
+        if db in ("docker-daemon-down", "container-missing"):
+            if "db" not in alerted:
+                logger.error("Database unavailable (%s) — trading DB writes "
+                             "will fail until fixed", db)
+                _try_alert(f"🚨 WATCHDOG: database {db} — QuNtra can't "
+                           f"persist trades. Start Docker / the quntra-db "
+                           f"container.")
+                alerted.add("db")
+        else:
+            alerted.discard("db")
         for name in SERVICES:
             pid_file, _, _ = SERVICES[name]
             if pid_alive(pid_file):

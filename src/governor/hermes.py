@@ -407,6 +407,19 @@ class HermesCoordinator:
         return report or "No paper trades recorded yet."
 
     # ------------------------------------------------------------------ #
+    # Obsidian export — mirror the DB into a linked markdown vault the
+    # operator can browse. Read-only against trading; failures never raise.
+
+    def sync_obsidian(self) -> dict:
+        """Regenerate the Obsidian vault from the database."""
+        from src.integrations import ObsidianVault
+        try:
+            return ObsidianVault(db_url=self.db_url).sync()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Obsidian sync failed")
+            return {"error": str(e)}
+
+    # ------------------------------------------------------------------ #
     # Scheduler hook points (thin wrappers so cron jobs stay 1-liners)
 
     def arm_system(self):

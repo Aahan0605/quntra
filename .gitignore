@@ -157,3 +157,6 @@ data/quntra.db
 data/cache/
 data/models/
 mlruns/
+data/obsidian_vault/
+data/mlflow.db
+data/mlruns/

@@ -310,3 +310,27 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 - Verified: hermes.py diff is 100% additive (0 lines removed);
   paper_trader/drawdown_circuit/consecutive_loss_guard/rebalancer/
   costs.py/costs.env completely untouched this session.
+
+## Obsidian integration + tomorrow-readiness (2026-07-20)
+
+- [DONE] src/integrations/obsidian.py: ObsidianVault exporter. Read-only
+  against the DB, idempotent, no new deps. Renders Daily/ (per trading day),
+  Tickers/ (per-instrument history with [[backlinks]]), Reports/ (mirrors
+  data/reports/*.txt), Knowledge/ (lessons by type), and a Home.md index
+  with live gate status. Free — a local folder Obsidian opens as a vault.
+- [DONE] Wiring (all additive): Hermes.sync_obsidian(); scheduler job
+  obsidian_sync daily 17:20 IST (15->16 jobs); /obsidian Telegram command
+  (31->32); OBSIDIAN_VAULT_DIR env; vault gitignored. 7 new tests.
+- CRITICAL FIX during readiness check: Docker Desktop daemon was DOWN, so
+  Postgres (port 5432) was refusing connections — the live scheduler could
+  not persist trades on day 1. Started Docker + quntra-db container (day-1
+  trade data intact). Enabled Docker Desktop auto-start on login. Taught
+  the watchdog to keep the quntra-db container up whenever Docker runs and
+  to alert once if Docker itself is down (ensure_database()).
+- READINESS: refreshed the market-data cache (was 17 days stale, last bar
+  2026-07-03) to 2026-07-17 via the yfinance path. With fresh data the
+  council now scores a real watchlist (RELIANCE/TCS/ICICIBANK >=9/12) and
+  produces 3 executable LONG signals — proof the pipeline is ready.
+- Restarted watchdog -> scheduler (16 jobs) + bot with all new code.
+  249 tests passing. Frozen paper-trading files untouched; hermes.py and
+  scheduler.py changes verified 100% additive.
