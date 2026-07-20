@@ -31,6 +31,12 @@ from src.utils import cache_loader
 
 logger = logging.getLogger(__name__)
 
+_ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
+# Escape hatch: set QUNTRA_DISABLE_KITE=1 to force the free data sources
+# (e.g. in tests or if a Kite plan lacks the market-data subscription).
+DataFetcher_KITE_DISABLED = __import__("os").getenv(
+    "QUNTRA_DISABLE_KITE", "") == "1"
+
 
 @dataclass
 class DataQualityReport:
@@ -106,13 +112,21 @@ class UnifiedDataFetcher:
     # Live quotes
 
     def get_live_quote(self, tickers: list[str]) -> pd.DataFrame:
-        """Live quotes via jugaad-data NSELive, per-ticker yfinance fallback.
+        """Live quotes, best source first: Kite (real-time) -> NSELive ->
+        yfinance (~15 min delayed).
 
         Columns: ticker, last_price, close, open, day_high, day_low,
-        prev_close, change_pct, timestamp, source. yfinance quotes are
-        delayed ~15 min — the 'source' column lets callers apply extra
-        caution (wider slippage assumptions) on fallback data.
+        prev_close, change_pct, timestamp, source. The 'source' column lets
+        callers apply extra caution (wider slippage) on delayed data.
+
+        Kite gives real-time NSE data but needs a valid daily access token
+        (scripts/kite_login.py). This is DATA ONLY — ltp/quote, never an
+        order call — so it's safe during paper trading. Without a token it
+        silently falls through to the free sources.
         """
+        # Preferred: Kite real-time (batch call for all tickers at once)
+        kite_rows = self._kite_quotes(tickers)
+
         live = None
         try:
             from jugaad_data.nse import NSELive
@@ -122,6 +136,9 @@ class UnifiedDataFetcher:
 
         rows = []
         for t in tickers:
+            if t in kite_rows:
+                rows.append(kite_rows[t])
+                continue
             if live is not None:
                 try:
                     q = live.stock_quote(nse_symbol(t))
@@ -149,6 +166,77 @@ class UnifiedDataFetcher:
             else:
                 logger.error("No quote available for %s from any source", t)
         return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------ #
+    # Kite real-time quotes (data only — never places orders)
+
+    _kite = None            # cached KiteConnect client
+    _kite_tried = False     # don't retry connect() every call in one process
+
+    def _get_kite(self):
+        """Lazily build a KiteConnect client from secrets. Returns None if
+        credentials are missing or the daily access token is invalid."""
+        if self._kite is not None or DataFetcher_KITE_DISABLED:
+            return self._kite
+        if self.__class__._kite_tried:
+            return self.__class__._kite
+        self.__class__._kite_tried = True
+        try:
+            import os
+
+            from dotenv import load_dotenv
+            load_dotenv(_ROOT / "config" / "secrets.env")
+            api_key = os.getenv("KITE_API_KEY")
+            token = os.getenv("KITE_ACCESS_TOKEN")
+            if not (api_key and token):
+                return None
+            from kiteconnect import KiteConnect
+            k = KiteConnect(api_key=api_key)
+            k.set_access_token(token)
+            k.ltp(["NSE:INFY"])  # cheap auth probe; raises on a bad token
+            self.__class__._kite = k
+            logger.info("Kite real-time quotes enabled")
+            return k
+        except Exception as exc:  # noqa: BLE001 — degrade to free sources
+            logger.info("Kite real-time unavailable (%s) — using NSELive/"
+                        "yfinance. Run scripts/kite_login.py for a fresh "
+                        "token.", str(exc)[:80])
+            return None
+
+    @staticmethod
+    def _kite_symbol(ticker: str) -> str:
+        """RELIANCE.NS -> NSE:RELIANCE (Kite's exchange:tradingsymbol)."""
+        return f"NSE:{ticker[:-3] if ticker.endswith('.NS') else ticker}"
+
+    def _kite_quotes(self, tickers: list[str]) -> dict[str, dict]:
+        """Real-time quotes for as many tickers as Kite can serve. Empty
+        dict when Kite is unavailable — caller falls through to free sources."""
+        k = self._get_kite()
+        if k is None:
+            return {}
+        symmap = {self._kite_symbol(t): t for t in tickers}
+        try:
+            data = k.quote(list(symmap.keys()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Kite quote batch failed (%s) — falling back", exc)
+            return {}
+        out: dict[str, dict] = {}
+        for sym, q in data.items():
+            t = symmap.get(sym)
+            if t is None or q.get("last_price") is None:
+                continue
+            ohlc = q.get("ohlc") or {}
+            prev = ohlc.get("close")
+            last = q.get("last_price")
+            out[t] = {
+                "ticker": t, "last_price": last, "close": last,
+                "open": ohlc.get("open"), "day_high": ohlc.get("high"),
+                "day_low": ohlc.get("low"), "prev_close": prev,
+                "change_pct": ((last / prev - 1) * 100 if prev else None),
+                "timestamp": q.get("timestamp"),
+                "source": "kite_realtime",
+            }
+        return out
 
     # ------------------------------------------------------------------ #
     # yfinance fallbacks (delayed data — acceptable when NSE is down)

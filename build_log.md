@@ -334,3 +334,20 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 - Restarted watchdog -> scheduler (16 jobs) + bot with all new code.
   249 tests passing. Frozen paper-trading files untouched; hermes.py and
   scheduler.py changes verified 100% additive.
+
+## Kite real-time quotes for paper trading (2026-07-20)
+
+- [DONE] UnifiedDataFetcher.get_live_quote now tries Kite real-time FIRST
+  (batch quote() call), then NSELive, then yfinance (~15min delayed).
+  Kite is DATA ONLY — ltp/quote, never an order — safe during paper
+  trading. _get_kite() lazily connects, auth-probes with ltp(), caches the
+  client per process, and returns None (silent fallback) on missing/expired
+  token. QUNTRA_DISABLE_KITE=1 forces free sources. 5 new tests (mocked).
+- data_fetcher.py is NOT in the frozen list; frozen paper-trading files
+  untouched. 254 tests passing.
+- BLOCKER for activation (user action): the KITE_ACCESS_TOKEN in secrets was
+  the API secret copied in, not a real session token — kite.ltp() returns
+  TokenException. Real-time stays off until the user runs the daily login:
+  scripts/kite_login.py --login-url  ->  log in  ->  --request-token <T>.
+  Until then paper trading continues on yfinance_delayed (fine for a
+  multi-day-hold strategy).
