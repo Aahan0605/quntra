@@ -203,6 +203,8 @@ Your AI quantitative research organization
 /paper_progress — Paper trading gate status (X/40 days)
 /gate_report — Full day-by-day trading history (auto-sent at day 40)
 /obsidian — Regenerate the Obsidian knowledge vault from the database
+/start_trading — Start today's paper session from your phone (no laptop)
+/kite_token — Refresh the daily Kite token: /kite_token <request_token>
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 PERFORMANCE
@@ -715,6 +717,70 @@ class QuNtraTelegramBot:
                 f"  {r['vault']}\n"
                 "Open that folder in Obsidian: Open folder as vault.")
 
+    def cmd_start_trading(self) -> str:
+        """Kick off today's paper session from the phone: run pre-market
+        (build the watchlist) and arm the OMS. The scheduler's minute loop
+        then executes — no laptop needed. Normally the 06:00 job does this
+        automatically; this is the manual trigger / catch-up."""
+        from scripts.scheduler import is_trading_day
+        if not is_trading_day():
+            return ("📴 Markets are closed today (weekend/holiday) — nothing "
+                    "to start. The session begins automatically at 06:00 IST "
+                    "on the next trading day.")
+        if self.alerter is not None:
+            try:
+                self.alerter.send("⏳ Starting paper session — running "
+                                  "pre-market research and scoring…")
+            except Exception:  # noqa: BLE001
+                pass
+        res = self.hermes.run_pre_market_sequence()
+        self.hermes.arm_system()
+        watch = (self.hermes.get_system_state("premarket") or {}).get(
+            "watchlist", [])
+        oms = (self.hermes.get_system_state("oms") or {}).get("enabled")
+        if not watch:
+            return ("⚠️ Session armed but the watchlist is empty — nothing "
+                    "scored ≥9/12 today, so no trades will fire. OMS "
+                    f"enabled: {oms}.")
+        return (f"✅ Paper session started · OMS armed ({oms})\n"
+                f"Watchlist ({len(watch)}): {', '.join(watch[:8])}"
+                + ("…" if len(watch) > 8 else "") + "\n"
+                "The trading loop will execute up to 3 trades on its next "
+                "minute tick. Watch /open_positions.")
+
+    def cmd_kite_token(self, *args) -> str:
+        """Refresh the daily Kite access token from the phone. Send the
+        request_token from the login redirect URL:  /kite_token <token>."""
+        token = (args[0] if args else "").strip()
+        if not token:
+            from scripts.kite_login import _read_env  # login URL helper
+            try:
+                import os
+                from kiteconnect import KiteConnect
+                api_key = _read_env().get("KITE_API_KEY", "")
+                url = KiteConnect(api_key=api_key).login_url() if api_key \
+                    else "(set KITE_API_KEY first)"
+            except Exception:  # noqa: BLE001
+                url = "(kiteconnect unavailable)"
+            return ("Usage: /kite_token <request_token>\n\n"
+                    "1. Open this login URL, approve:\n" + url + "\n"
+                    "2. Copy request_token from the redirect URL\n"
+                    "3. Send: /kite_token <that token>")
+        from src.integrations.kite_session import (exchange_request_token,
+                                                   token_status)
+        try:
+            at = exchange_request_token(token)
+        except Exception as e:  # noqa: BLE001
+            return (f"⚠️ Token exchange failed: {str(e)[:120]}\n"
+                    "request_token is single-use and expires in minutes — "
+                    "get a fresh one from the login URL (send /kite_token "
+                    "with no argument for it).")
+        status = token_status()
+        return (f"✅ Kite access token updated ({at[:6]}…) — status: {status}.\n"
+                "Valid until ~07:30 IST tomorrow. (Real-time quotes still "
+                "need the paid market-data subscription; without it, quotes "
+                "stay on delayed yfinance.)")
+
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""
         from src.reporting import metrics as M
@@ -785,6 +851,8 @@ class QuNtraTelegramBot:
         "gate_report",
         # obsidian: regenerate the markdown vault from the DB
         "obsidian",
+        # phone-run controls: start the session, refresh the Kite token
+        "start_trading", "kite_token",
     ]
 
     def run_polling(self):

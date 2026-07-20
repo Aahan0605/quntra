@@ -376,3 +376,25 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   Postgres (today: 3 trades with full detail — ticker, dir, qty, entry,
   score, signal_hash — the exact record needed for future live-trading
   analysis). 260 tests passing; frozen files untouched.
+
+## Phone-run controls: /start_trading + /kite_token (2026-07-20)
+
+- User goal: run the whole thing from Telegram, no laptop.
+- [DONE] /start_trading: runs pre_market_sequence + arm_system on demand
+  (writes watchlist + oms-enabled to the shared DB; the scheduler's minute
+  loop then executes). Sends an immediate "starting…" ack, then the result.
+  Trading-day guarded. This is the manual/catch-up version of the automatic
+  06:00 job — so a missed morning (like today's DB outage) is fixable from
+  the phone.
+- [DONE] /kite_token <request_token>: exchanges the login request_token for
+  today's access token and writes it to secrets.env — the full daily
+  re-login now works from a phone (login URL opens in mobile browser, copy
+  request_token from the redirect, send it to the bot). No arg → replies
+  with the login URL + instructions. kite_session.exchange_request_token()
+  is the shared helper; it also clears the fetcher's cached Kite client.
+- 34 commands total (was 32). 7 new tests (test_phone_controls.py) + the
+  count assertion updated. 266 tests passing. Frozen files untouched;
+  hermes.py additive.
+- Caveat surfaced to the user in the /kite_token reply: real-time quotes
+  still need the paid market-data subscription; without it, quotes stay on
+  delayed yfinance regardless of a fresh token.
