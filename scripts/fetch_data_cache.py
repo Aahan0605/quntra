@@ -118,7 +118,15 @@ def main() -> int:
                     help="seconds between tickers (NSE rate-limit courtesy)")
     ap.add_argument("--no-db", action="store_true",
                     help="skip mirroring into the price_data table")
+    ap.add_argument("--universe", choices=["default", "nifty200"],
+                    default="default",
+                    help="which universe to fetch (default = the 25-name list)")
     args = ap.parse_args()
+
+    if args.universe == "nifty200":
+        from src.utils.universe_nifty200 import NIFTY200 as tickers_to_fetch
+    else:
+        tickers_to_fetch = UNIVERSE
 
     end = date.today()
     start = (date.fromisoformat(args.start) if args.start
@@ -127,7 +135,7 @@ def main() -> int:
 
     ok, failed = 0, []
     first_date, last_date = None, None
-    for ticker in UNIVERSE:
+    for ticker in tickers_to_fetch:
         out = CACHE / f"{ticker.replace('&', '_')}.csv"
         print(f"{ticker} ...")
         df = fetch_jugaad(nse_symbol(ticker), start, end)
@@ -152,13 +160,17 @@ def main() -> int:
         bench.to_csv(CACHE / "NIFTY50_BENCH.csv", index=False)
         print(f"benchmark ^NSEI: {len(bench)} rows")
 
-    print(f"\nDATA FETCH COMPLETE: {ok}/{len(UNIVERSE)} tickers, "
+    n_universe = len(tickers_to_fetch)
+    print(f"\nDATA FETCH COMPLETE: {ok}/{n_universe} tickers, "
           f"date range {first_date} to {last_date}")
     if failed:
         print("Failed:", failed)
     _executor.shutdown(wait=False, cancel_futures=True)
-    if ok < 23:
-        print(f"GATE FAIL: need >= 23/25 tickers, got {ok}")
+    # Gate: the small universe needs >=23/25; a large universe just needs a
+    # healthy majority (thin/illiquid names are expected to drop out).
+    min_ok = 23 if n_universe <= 25 else int(n_universe * 0.85)
+    if ok < min_ok:
+        print(f"GATE FAIL: need >= {min_ok}/{n_universe} tickers, got {ok}")
         return 1
     return 0
 

@@ -132,6 +132,14 @@ class NewsAgent(BaseResearchAgent):
         items = items[:20]
         avg_sent = (round(sum(i["sentiment"] for i in items) / len(items), 2)
                     if items else 0.0)
+        # Per-ticker sentiment: average across items mentioning each ticker,
+        # so the signal council can tilt each stock's score by its own news.
+        _by_ticker: dict[str, list[float]] = {}
+        for it in items:
+            for tk in it.get("tickers", []):
+                _by_ticker.setdefault(tk, []).append(it["sentiment"])
+        ticker_sentiment = {tk: round(sum(v) / len(v), 3)
+                            for tk, v in _by_ticker.items()}
         summary = (f"{len(items)} relevant news items from "
                    f"{len(sources_used)}/{len(self.feeds)} feeds; "
                    f"average sentiment {avg_sent:+.2f}"
@@ -146,6 +154,7 @@ class NewsAgent(BaseResearchAgent):
             reasoning="keyword sentiment over trusted RSS; relevance gate 0.5",
             payload={"avg_sentiment": avg_sent,
                      "n_items": len(items),
+                     "ticker_sentiment": ticker_sentiment,
                      "tickers_in_news": sorted({t for i in items
                                                 for t in i["tickers"]})},
         )

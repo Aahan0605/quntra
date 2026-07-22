@@ -61,6 +61,8 @@ class SignalCouncil:
 
         macro_vote = self._macro_vote()
         sector_votes = self._sector_votes(panel)
+        news_sentiment = self._news_ticker_sentiment()   # research overlay
+        fundamental_flagged = self._fundamental_flagged()  # veto set
         scores: dict[str, int] = {}
         details: dict[str, dict] = {}
         for ticker in panel.columns:
@@ -73,6 +75,11 @@ class SignalCouncil:
                 "ml": self._ml_vote(ticker),
                 "macro": macro_vote,
                 "sector": sector_votes.get(ticker, 1),
+                # per-stock research overlay: news tilts ±1, weak
+                # fundamentals veto -1 (never a bonus)
+                "news": self._news_vote(ticker, news_sentiment),
+                "fundamental": self._fundamental_vote(ticker,
+                                                      fundamental_flagged),
             }
             scores[ticker] = int(sum(votes.values()))
             details[ticker] = votes
@@ -133,6 +140,55 @@ class SignalCouncil:
             return 1
         base = {"POSITIVE": 2, "NEGATIVE": 0}.get(bias, 1)
         return max(0, base - (1 if caution else 0))
+
+    def _latest_note_payload(self, source: str, hours: int = 48) -> dict:
+        """Most recent research_note payload for a source, or {}."""
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import select
+        from src.db import ResearchNote, get_session
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+            with get_session(self.db_url) as s:
+                row = s.execute(
+                    select(ResearchNote)
+                    .where(ResearchNote.source == source,
+                           ResearchNote.created_at >= cutoff)
+                    .order_by(ResearchNote.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                return (row.entities or {}) if row else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _news_ticker_sentiment(self) -> dict[str, float]:
+        return self._latest_note_payload("news_agent").get(
+            "ticker_sentiment", {}) or {}
+
+    def _fundamental_flagged(self) -> set[str]:
+        flagged = self._latest_note_payload(
+            "fundamental_agent", hours=24 * 8).get("flagged", []) or []
+        return {f.get("ticker") for f in flagged if isinstance(f, dict)}
+
+    @staticmethod
+    def _news_vote(ticker: str, sentiment_map: dict[str, float]) -> int:
+        """+1 clearly positive news, -1 clearly negative, else 0. A research
+        overlay so a stock's own headlines tilt its score."""
+        s = sentiment_map.get(ticker)
+        if s is None:
+            return 0
+        if s >= 0.3:
+            return 1
+        if s <= -0.3:
+            return -1
+        return 0
+
+    @staticmethod
+    def _fundamental_vote(ticker: str, flagged: set[str]) -> int:
+        """-1 when the fundamental agent flagged weak valuation/balance sheet
+        (high P/E, high debt, low ROE), else 0. Never a bonus — fundamentals
+        can veto, not inflate."""
+        return -1 if ticker in flagged else 0
 
     @staticmethod
     def _sector_votes(panel: pd.DataFrame) -> dict[str, int]:

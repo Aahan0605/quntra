@@ -148,3 +148,38 @@ def test_position_held_inside_band():
     trader.fetcher.price = 101.0
     assert trader.manage_positions() == []
     assert len(trader.get_positions()) == 1
+
+
+def test_news_and_fundamental_votes():
+    from src.governor.council import SignalCouncil
+    c = SignalCouncil()
+    sent = {"RELIANCE.NS": 0.5, "TCS.NS": -0.4, "INFY.NS": 0.1}
+    assert c._news_vote("RELIANCE.NS", sent) == 1    # good news
+    assert c._news_vote("TCS.NS", sent) == -1        # bad news
+    assert c._news_vote("INFY.NS", sent) == 0        # neutral
+    assert c._news_vote("SBIN.NS", sent) == 0        # no news
+    flagged = {"TCS.NS"}
+    assert c._fundamental_vote("TCS.NS", flagged) == -1  # weak fundamentals
+    assert c._fundamental_vote("RELIANCE.NS", flagged) == 0
+
+
+def test_research_votes_read_from_notes(tmp_path, monkeypatch):
+    import src.db.session as db_session
+    from src.db import ResearchNote, get_session, init_db
+    url = f"sqlite:///{tmp_path}/council_news.db"
+    monkeypatch.setattr(db_session, "_engine", None)
+    monkeypatch.setattr(db_session, "_SessionLocal", None)
+    init_db(url)
+    with get_session(url) as s:
+        s.add(ResearchNote(note_type="news", source="news_agent",
+                           summary="x", entities={"ticker_sentiment":
+                                                  {"RELIANCE.NS": 0.6}}))
+        s.add(ResearchNote(note_type="fundamentals", source="fundamental_agent",
+                           summary="x", entities={"flagged":
+                                                  [{"ticker": "TCS.NS"}]}))
+    from src.governor.council import SignalCouncil
+    c = SignalCouncil(db_url=url)
+    assert c._news_ticker_sentiment().get("RELIANCE.NS") == 0.6
+    assert "TCS.NS" in c._fundamental_flagged()
+    monkeypatch.setattr(db_session, "_engine", None)
+    monkeypatch.setattr(db_session, "_SessionLocal", None)

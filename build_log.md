@@ -412,3 +412,26 @@ risk layer) did not exist in the repo — Phase 0 was executed as
   _refresh_caches(). 267 tests passing; frozen files untouched.
 - Confirmed the stored token was genuinely expired (July 20 -> July 22), so
   a fresh login is required regardless of the format fix.
+
+## Nifty 200 expansion + per-stock research wiring (2026-07-22)
+
+User chose (via prompt): expand universe to Nifty 200, and wire per-stock
+news + fundamentals into scoring. "All ~1900 NSE" was declined as unsafe
+(illiquid/unvalidatable); Nifty 200 is the liquid-index compromise.
+
+- [DONE] N200-1: src/utils/universe_nifty200.py — 200 tickers +
+  NIFTY200_SECTOR_MAP (18 sectors), generated from the official NSE
+  ind_nifty200list.csv (fetched live from niftyindices.com). Kept SEPARATE
+  from the live 24-name UNIVERSE until data+models are ready.
+- [IN PROGRESS] N200-2: fetch_data_cache gained --universe {default,
+  nifty200}; large-universe gate is >=85% (thin/new IPOs like GROWW,
+  LENSKART, LGEINDIA, ICICIAMC expected to drop — no 5y history). Fetch
+  running in background.
+- [DONE] RW: per-stock research overlay in SignalCouncil.score_premarket.
+  news_agent now stores ticker_sentiment{ticker:score} in its payload;
+  council _news_vote tilts +1/-1 on a stock's own headlines, _fundamental_
+  vote vetoes -1 when the fundamental agent flagged weak valuation/balance
+  sheet (never a bonus). Both read the latest research_note payloads, so
+  the overnight/pre-market agents do the heavy lifting and the council just
+  reads their conclusions. Gate stays >=9. 2 new tests; 269 total passing.
+- Frozen files untouched. hermes/scheduler unchanged this commit.
