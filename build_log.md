@@ -435,3 +435,31 @@ news + fundamentals into scoring. "All ~1900 NSE" was declined as unsafe
   the overnight/pre-market agents do the heavy lifting and the council just
   reads their conclusions. Gate stays >=9. 2 new tests; 269 total passing.
 - Frozen files untouched. hermes/scheduler unchanged this commit.
+
+## Nifty 200/100 validation — HONEST GATE FAILURE (2026-07-22)
+
+Built the full universe-expansion pipeline and validated it properly.
+Result: BOTH broad universes FAIL the -15% max-drawdown gate. Live system
+was NOT switched — it stays on the validated 24 (all 3 gates pass).
+
+- Universe switch: QUNTRA_UNIVERSE={default,nifty100,nifty200} env var in
+  universe.py switches the whole system (fetch/train/validate/council/
+  sector). Default stays the 24. Sector agent merges NIFTY200_SECTOR_MAP.
+- load_close_panel now drops tickers with < min_history bars (default
+  1000 ≈ 4y) — without this, recent IPOs (Swiggy/Paytm/Hyundai/Jio Fin)
+  truncated the backtest window to ~19 days and produced a meaningless
+  "PASS". After the fix the panel is a proper ~900-1150 day window.
+- Nifty 200 (185 tickers, 904d): Sharpe +1.66 PASS, Calmar +1.26 PASS,
+  MaxDD -21.9% FAIL.
+- Nifty 100 (98 tickers, 984d): Sharpe +1.73 PASS, Calmar +1.26 PASS,
+  MaxDD -20.8% FAIL.
+- Root cause: the long-only markowitz-weighted portfolio draws down ~-21%
+  on ANY broad Indian-equity universe over the 2022-2026 window (which
+  included real corrections). The curated 24 mega-caps squeaked under at
+  -14.8% partly by selection. Broadening breaks the risk gate.
+- 25 Nifty-200 models trained (data/models_nifty200/, 54% OOS gate) —
+  kept, not deployed.
+- DECISION REQUIRED: broad universe needs added drawdown control (vol
+  targeting / dynamic exposure) to pass the -15% gate — a real strategy
+  change with its own validation. Not shipped. Live system untouched.
+- 269 tests passing; frozen files untouched.

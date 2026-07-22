@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from src.agents.research.base import BaseResearchAgent, ResearchOutput
 from src.utils import cache_loader
-from src.utils.universe import UNIVERSE
+from src.utils.universe import UNIVERSE, UNIVERSE_SET
 
+# The 25-name map (default). In nifty200 mode we merge in the full
+# 200-name sector map so every traded ticker has a sector.
 SECTOR_MAP = {
     "RELIANCE.NS": "ENERGY",
     "TCS.NS": "IT", "INFY.NS": "IT", "HCLTECH.NS": "IT", "WIPRO.NS": "IT",
@@ -28,6 +30,12 @@ SECTOR_MAP = {
     "TATASTEEL.NS": "METALS",
     "ASIANPAINT.NS": "CONSUMER",
 }
+
+if UNIVERSE_SET == "nifty200":
+    from src.utils.universe_nifty200 import NIFTY200_SECTOR_MAP
+    # Nifty 200 map is authoritative for the wider set; keep the curated
+    # 25-name labels where they differ (they're more granular).
+    SECTOR_MAP = {**NIFTY200_SECTOR_MAP, **SECTOR_MAP}
 
 
 class SectorAgent(BaseResearchAgent):

@@ -30,22 +30,28 @@ def load_ticker(ticker: str) -> pd.DataFrame:
     return df
 
 
-def load_close_panel(universe: list[str]) -> pd.DataFrame:
+def load_close_panel(universe: list[str],
+                     min_history: int = 1000) -> pd.DataFrame:
     """Wide DataFrame of close prices: index=date, columns=tickers.
 
     Tickers without a cache file are skipped (e.g. TATAMOTORS.NS after
-    its 2025 demerger delisting) — a single dead symbol must not take
-    down every consumer of the panel.
+    its 2025 demerger delisting). Tickers with fewer than `min_history`
+    bars are ALSO dropped — otherwise a recent IPO (Swiggy, Paytm, Hyundai
+    in the Nifty 200) would truncate the final dropna() window to a handful
+    of days and make any backtest meaningless. ~1000 bars ≈ 4 years.
     """
     frames = {}
     for t in universe:
         try:
-            frames[t] = load_ticker(t)["close"]
+            s = load_ticker(t)["close"]
         except FileNotFoundError:
             continue
+        if int(s.notna().sum()) >= min_history:
+            frames[t] = s
     if not frames:
         raise FileNotFoundError(
-            "No cached tickers found. Run scripts/fetch_data_cache.py")
+            "No cached tickers with sufficient history. Run "
+            "scripts/fetch_data_cache.py (or lower min_history).")
     panel = pd.DataFrame(frames).ffill().dropna()
     return panel
 

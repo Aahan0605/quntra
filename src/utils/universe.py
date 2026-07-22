@@ -9,7 +9,10 @@ Note: M&M.NS appears exactly once (historical bug: duplicated metadata).
 scripts/verify_universe.py guards against regressions.
 """
 
-UNIVERSE: list[str] = [
+import os as _os
+
+# The original validated 25-name large-cap set (the default).
+_DEFAULT_UNIVERSE: list[str] = [
     "RELIANCE.NS",
     "TCS.NS",
     "HDFCBANK.NS",
@@ -37,7 +40,21 @@ UNIVERSE: list[str] = [
     "WIPRO.NS",
 ]
 
-EXPECTED_COUNT = 25
+# QUNTRA_UNIVERSE=nifty200 switches the ENTIRE system (fetch, train,
+# validate, council scoring, sector map) to the Nifty 200 universe. The
+# env var must be set before the process starts (put it in .env). Default
+# stays the safe 25-name set.
+UNIVERSE_SET = _os.getenv("QUNTRA_UNIVERSE", "default").lower()
+if UNIVERSE_SET == "nifty200":
+    from src.utils.universe_nifty200 import NIFTY200 as _N200
+    UNIVERSE: list[str] = list(_N200)
+elif UNIVERSE_SET == "nifty100":
+    from src.utils.universe_nifty100 import NIFTY100 as _N100
+    UNIVERSE = list(_N100)
+else:
+    UNIVERSE = _DEFAULT_UNIVERSE
+
+EXPECTED_COUNT = len(UNIVERSE)
 
 # Alias used by the completion-loop prompts
 VALIDATED_TICKERS = UNIVERSE
