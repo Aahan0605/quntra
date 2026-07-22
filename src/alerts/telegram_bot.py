@@ -766,20 +766,22 @@ class QuNtraTelegramBot:
                     "1. Open this login URL, approve:\n" + url + "\n"
                     "2. Copy request_token from the redirect URL\n"
                     "3. Send: /kite_token <that token>")
-        from src.integrations.kite_session import (exchange_request_token,
-                                                   token_status)
+        from src.integrations.kite_session import set_token, token_status
         try:
-            at = exchange_request_token(token)
+            at, how = set_token(token)
         except Exception as e:  # noqa: BLE001
-            return (f"⚠️ Token exchange failed: {str(e)[:120]}\n"
-                    "request_token is single-use and expires in minutes — "
-                    "get a fresh one from the login URL (send /kite_token "
-                    "with no argument for it).")
+            return (f"⚠️ Couldn't use that token: {str(e)[:130]}\n\n"
+                    "Send the *request_token* from the login redirect URL "
+                    "(not the API secret). It's single-use and expires in "
+                    "minutes, so do it right after logging in. Send "
+                    "/kite_token with no argument to get a fresh login link.")
+        note = ("recognised as a ready access token" if how == "direct"
+                else "exchanged your request_token for an access token")
         status = token_status()
-        return (f"✅ Kite access token updated ({at[:6]}…) — status: {status}.\n"
-                "Valid until ~07:30 IST tomorrow. (Real-time quotes still "
-                "need the paid market-data subscription; without it, quotes "
-                "stay on delayed yfinance.)")
+        return (f"✅ Kite token updated ({at[:6]}…) — {note}. Status: "
+                f"{status}.\nValid until ~07:30 IST tomorrow. (Real-time "
+                "quotes still need the paid market-data subscription; "
+                "without it, quotes stay on delayed yfinance.)")
 
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""

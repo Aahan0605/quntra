@@ -398,3 +398,17 @@ risk layer) did not exist in the repo — Phase 0 was executed as
 - Caveat surfaced to the user in the /kite_token reply: real-time quotes
   still need the paid market-data subscription; without it, quotes stay on
   delayed yfinance regardless of a fresh token.
+
+## /kite_token accepts either token type (2026-07-22)
+
+- User hit "Token exchange failed" sending what they called an access
+  token — the command only accepted a request_token. Fix: set_token() in
+  kite_session.py now tries the string as an access token first (profile()
+  probe; a request_token used here fails auth but is NOT consumed), and
+  only falls back to generate_session() exchange if that fails. Returns
+  (access_token, how) where how is 'direct' or 'exchanged'. Command reports
+  which path worked and gives a clearer error naming request_token vs
+  secret. exchange_request_token() retained for the CLI, both share
+  _refresh_caches(). 267 tests passing; frozen files untouched.
+- Confirmed the stored token was genuinely expired (July 20 -> July 22), so
+  a fresh login is required regardless of the format fix.

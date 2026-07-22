@@ -67,32 +67,41 @@ def test_kite_token_usage_when_no_arg(bot, monkeypatch):
     assert "request_token" in out
 
 
-def test_kite_token_exchange_success(bot, monkeypatch):
+def test_kite_token_direct_access_token(bot, monkeypatch):
     called = {}
 
-    def fake_exchange(tok):
+    def fake_set(tok):
         called["tok"] = tok
-        return "NEWACCESSTOKEN123"
+        return "NEWACCESSTOKEN123", "direct"
 
-    monkeypatch.setattr(
-        "src.integrations.kite_session.exchange_request_token", fake_exchange)
+    monkeypatch.setattr("src.integrations.kite_session.set_token", fake_set)
     monkeypatch.setattr(
         "src.integrations.kite_session.token_status", lambda: "valid")
-    out = bot.dispatch("kite_token", "reqtok123")
-    assert called["tok"] == "reqtok123"
+    out = bot.dispatch("kite_token", "someaccesstoken")
+    assert called["tok"] == "someaccesstoken"
     assert "updated" in out.lower()
+    assert "ready access token" in out.lower()
     assert "NEWACC" in out
 
 
-def test_kite_token_exchange_failure(bot, monkeypatch):
+def test_kite_token_exchanged_request_token(bot, monkeypatch):
+    monkeypatch.setattr("src.integrations.kite_session.set_token",
+                        lambda tok: ("EXCHANGED9", "exchanged"))
+    monkeypatch.setattr(
+        "src.integrations.kite_session.token_status", lambda: "valid")
+    out = bot.dispatch("kite_token", "reqtok123")
+    assert "exchanged" in out.lower()
+    assert "EXCHAN" in out
+
+
+def test_kite_token_failure(bot, monkeypatch):
     def boom(tok):
         raise RuntimeError("Token is invalid or has expired")
 
-    monkeypatch.setattr(
-        "src.integrations.kite_session.exchange_request_token", boom)
+    monkeypatch.setattr("src.integrations.kite_session.set_token", boom)
     out = bot.dispatch("kite_token", "badtoken")
-    assert "failed" in out.lower()
-    assert "single-use" in out.lower()
+    assert "couldn't use that token" in out.lower()
+    assert "request_token" in out.lower()
 
 
 def test_dispatch_never_raises_new_commands(bot, monkeypatch):
