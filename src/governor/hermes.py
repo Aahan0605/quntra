@@ -589,6 +589,56 @@ class HermesCoordinator:
             f"Watchlist was: {state.get('watchlist', [])}\n"
         )
 
+    # ------------------------------------------------------------------ #
+    # Sleep-gap self-healing: a missed cron trigger (the machine slept
+    # through it — lid closed bypasses caffeinate) used to be silently
+    # skipped until the next day. Now it alerts immediately and, for the
+    # jobs where running late is still useful, runs a same-day catch-up.
+
+    _CATCHUP_JOBS = {
+        "close_mgmt": lambda h: h.begin_close_management(),
+        "post_market": lambda h: h.run_post_market_sequence(),
+        "eod_report": lambda h: h.send_eod_report(),
+        "gate_completion_check": lambda h: h.check_gate_completion(),
+        "obsidian_sync": lambda h: h.sync_obsidian(),
+    }
+    _MARKET_HOUR_CATCHUP = {"close_mgmt", "post_market", "eod_report"}
+
+    def handle_missed_job(self, job_id: str, scheduled_at_iso: str) -> None:
+        """Called by the scheduler's EVENT_JOB_MISSED listener."""
+        now = datetime.now(IST)
+        can_catchup = job_id in self._CATCHUP_JOBS
+        if self.telegram is not None:
+            try:
+                self.telegram.send(
+                    f"⚠️ Scheduled job '{job_id}' was missed (scheduled "
+                    f"{scheduled_at_iso}) — the machine likely slept "
+                    f"through it (closing the lid sleeps even with "
+                    f"caffeinate running). "
+                    + ("Running a catch-up now." if can_catchup
+                       else "No catch-up applies to this job — it resumes "
+                       "on its normal schedule."))
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not can_catchup:
+            return
+        # once per job per day — repeated misfire events must not re-run it
+        key = f"catchup_{job_id}"
+        today = now.date().isoformat()
+        if (self.get_system_state(key) or {}).get("date") == today:
+            return
+        self.set_system_state(key, {"date": today})
+
+        if job_id in self._MARKET_HOUR_CATCHUP:
+            from scripts.scheduler import is_trading_day
+            if not is_trading_day():
+                return
+        try:
+            self._CATCHUP_JOBS[job_id](self)
+        except Exception:  # noqa: BLE001
+            logger.exception("catch-up for missed job %s failed", job_id)
+
     @staticmethod
     def _safe(fn, name: str, result: dict):
         try:

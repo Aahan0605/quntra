@@ -463,3 +463,30 @@ was NOT switched — it stays on the validated 24 (all 3 gates pass).
   targeting / dynamic exposure) to pass the -15% gate — a real strategy
   change with its own validation. Not shipped. Live system untouched.
 - 269 tests passing; frozen files untouched.
+
+## Sleep-gap self-healing (2026-07-23)
+
+Root cause of today's gap: `caffeinate -i -m -s` does NOT prevent sleep on
+lid-close — only idle/disk/system sleep. A closed lid sleeps regardless,
+so close_mgmt (14:30) and post_market (15:30) were silently skipped today
+with zero notification, discovered only during a manual check.
+
+- [DONE] Hermes.handle_missed_job(job_id, scheduled_at) — new EVENT_JOB_
+  MISSED listener in scheduler.py. On ANY missed job: immediate Telegram
+  alert naming the job and explaining the likely cause (lid-close sleep
+  bypasses caffeinate). For close_mgmt/post_market/eod_report/
+  gate_completion_check/obsidian_sync: runs a same-day catch-up once
+  (system_state-guarded against duplicate misfire events), so a sleep gap
+  no longer silently erases the day's close-management/reporting cycle.
+  Market-hour catch-ups re-check is_trading_day() (a missed job doesn't
+  imply today is actually a trading day). market_loop deliberately has NO
+  catch-up — its next per-minute tick is the correction.
+- Purely additive: hermes.py 0 lines removed; scheduler.py's only touched
+  line is the EVENT_JOB_MISSED import (same import statement, more
+  symbols) — no job trigger/function changed. 17 jobs still register.
+- 8 new tests; 277 total passing.
+- NOT fixed (needs the user, can't be done from here): the actual lid-
+  close-sleep root cause. Options given: don't close the lid, plug in +
+  external display for clamshell mode, or move to AWS (scripts already
+  built in infra/, but AWS CLI has no configured credentials on this
+  machine — provisioning needs the user's AWS account access).

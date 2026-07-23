@@ -204,7 +204,8 @@ def main() -> int:
 
     # /health reads system_state["last_job_run"] to prove the scheduler
     # is not just alive but actually firing jobs.
-    from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+    from apscheduler.events import (EVENT_JOB_ERROR, EVENT_JOB_EXECUTED,
+                                    EVENT_JOB_MISSED)
 
     def _record_job(event):
         try:
@@ -217,7 +218,15 @@ def main() -> int:
         except Exception:  # noqa: BLE001 — bookkeeping never kills a job
             logger.exception("could not record last_job_run")
 
+    def _record_missed(event):
+        try:
+            hermes.handle_missed_job(
+                event.job_id, event.scheduled_run_time.isoformat())
+        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
+            logger.exception("could not handle missed job %s", event.job_id)
+
     scheduler.add_listener(_record_job, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+    scheduler.add_listener(_record_missed, EVENT_JOB_MISSED)
     logger.info("QuNtra scheduler starting — %d jobs, timezone IST",
                 len(scheduler.get_jobs()))
     try:
