@@ -146,7 +146,19 @@ dmypy.json
 cython_debug/
 
 # Data and Results
-data/
+# data/cache/*.csv and data/models/{*.pkl,*.json} DO ship — the passive
+# allocator, crash-risk, and regime modules need the price cache at
+# runtime, and the council needs the deployed models + the FDR audit
+# (multiple_testing.json) to know which of them survived correction.
+# Everything else under data/ is regenerable or a local-only artifact.
+data/*
+!data/cache/
+!data/models/
+data/cache/*
+!data/cache/*.csv
+data/models/*
+!data/models/*.pkl
+!data/models/*.json
 results/*.png
 results/quantum/*.png
 !results/quantum/benchmark_comparison.png
@@ -154,9 +166,17 @@ results/quantum/*.png
 # QuNtra — never commit these
 config/secrets.env
 data/quntra.db
-data/cache/
-data/models/
 mlruns/
 data/obsidian_vault/
 data/mlflow.db
 data/mlruns/
+data/backups/
+data/reports/
+data/models_nifty200/
+data/models_research/
+data/backtest_results/
+
+# runtime heartbeat (scheduler liveness proof) + process PID files —
+# meaningless local runtime state, changes every restart
+quntra.heartbeat
+*.pid

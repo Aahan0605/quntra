@@ -3,7 +3,7 @@
 import pytest
 
 import src.db.session as db_session
-from src.alerts.telegram_bot import QuNtraTelegramBot
+from src.alerts.telegram_bot import QuNtraTelegramBot, TelegramAlerter
 from src.db import init_db
 from src.governor.brain import QuNtraBrain
 from src.governor.hermes import HermesCoordinator
@@ -49,7 +49,15 @@ def bot(tmp_path, monkeypatch):
         loss_guard=ConsecutiveLossGuard(),
         research_team={},
     )
-    b = QuNtraTelegramBot(hermes, alerter=None)
+    # NEVER alerter=None here: QuNtraTelegramBot.__init__ does
+    # `alerter or TelegramAlerter.from_config()` — None doesn't mean "no
+    # alerts," it means "fall back to the real configured bot." This
+    # fixture used to do exactly that, so every run of
+    # test_dispatch_never_raises (which dispatches every command,
+    # including /start_trading) sent a real "Starting paper session…"
+    # push to the operator's actual phone. test_mode=True is what makes
+    # this offline.
+    b = QuNtraTelegramBot(hermes, alerter=TelegramAlerter(test_mode=True))
     yield b
     monkeypatch.setattr(db_session, "_engine", None)
     monkeypatch.setattr(db_session, "_SessionLocal", None)
@@ -66,6 +74,22 @@ def test_dispatch_never_raises(bot):
     for name in bot.COMMANDS:
         reply = bot.dispatch(name)
         assert isinstance(reply, str) and reply, f"/{name} gave no reply"
+        # dispatch() catches every exception and turns it into a "⚠️ /{name}
+        # failed: {e}" string reply — so a command that always raises would
+        # still pass the check above. This is the actual functional
+        # assertion: no command may be silently broken behind that catch.
+        assert not reply.startswith(f"⚠️ /{name} failed:"), (
+            f"/{name} is raising internally: {reply}")
+
+
+def test_dispatch_never_touches_the_real_telegram_api(bot):
+    """The regression this file's fixture bug would have been caught by:
+    /start_trading is the one command that unconditionally calls
+    alerter.send(). It must land in the test-mode ledger, never a real
+    HTTP request."""
+    assert bot.alerter.test_mode is True
+    bot.dispatch("start_trading")
+    assert any("Starting paper session" in msg for msg in bot.alerter.sent)
 
 
 def test_dispatch_unknown_command(bot):

@@ -4,7 +4,10 @@ QuNtra UnifiedDataFetcher — single interface for all market data.
 Routing table:
   NSE/BSE equity historical  -> jugaad-data, falling back to yfinance .NS
                                 then local cache when NSE is unreachable
-  NSE live quotes            -> jugaad-data live, per-ticker yfinance fallback
+  NSE live quotes            -> ICICI Breeze (real-time) -> yfinance
+                                (~15 min delayed). Kite and NSELive were
+                                dropped — neither ever served a real quote
+                                on this account/machine (see get_live_quote).
   Options chain              -> Bharat-SM-Data (Derivatives.NSE)
   Fundamentals               -> Bharat-SM-Data (Fundamentals.MoneyControl)
   RBI series                 -> jugaad-data RBI
@@ -32,10 +35,10 @@ from src.utils import cache_loader
 logger = logging.getLogger(__name__)
 
 _ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
-# Escape hatch: set QUNTRA_DISABLE_KITE=1 to force the free data sources
-# (e.g. in tests or if a Kite plan lacks the market-data subscription).
-DataFetcher_KITE_DISABLED = __import__("os").getenv(
-    "QUNTRA_DISABLE_KITE", "") == "1"
+# Escape hatch: set QUNTRA_DISABLE_BREEZE=1 to force yfinance-only
+# (e.g. in tests, or if the Breeze subscription lapses).
+DataFetcher_BREEZE_DISABLED = __import__("os").getenv(
+    "QUNTRA_DISABLE_BREEZE", "") == "1"
 
 
 @dataclass
@@ -112,54 +115,24 @@ class UnifiedDataFetcher:
     # Live quotes
 
     def get_live_quote(self, tickers: list[str]) -> pd.DataFrame:
-        """Live quotes, best source first: Kite (real-time) -> NSELive ->
-        yfinance (~15 min delayed).
+        """Live quotes, best source first: ICICI Breeze (real-time) ->
+        yfinance (~15 min delayed). Kite and NSELive were dropped: Kite's
+        market-data subscription isn't on this account (PermissionException
+        on every quote() call) and NSELive has never once worked on this
+        machine (NSE tarpits it) — two sources that never actually served
+        a quote, just extra failure paths to read through.
 
         Columns: ticker, last_price, close, open, day_high, day_low,
         prev_close, change_pct, timestamp, source. The 'source' column lets
         callers apply extra caution (wider slippage) on delayed data.
-
-        Kite gives real-time NSE data but needs a valid daily access token
-        (scripts/kite_login.py). This is DATA ONLY — ltp/quote, never an
-        order call — so it's safe during paper trading. Without a token it
-        silently falls through to the free sources.
         """
-        # Preferred: Kite real-time (batch call for all tickers at once)
-        kite_rows = self._kite_quotes(tickers)
-
-        live = None
-        try:
-            from jugaad_data.nse import NSELive
-            live = NSELive()
-        except Exception as exc:
-            logger.warning("NSELive unavailable (%s) — yfinance only", exc)
+        breeze_rows = self._breeze_quotes(tickers)
 
         rows = []
         for t in tickers:
-            if t in kite_rows:
-                rows.append(kite_rows[t])
+            if t in breeze_rows:
+                rows.append(breeze_rows[t])
                 continue
-            if live is not None:
-                try:
-                    q = live.stock_quote(nse_symbol(t))
-                    p = q.get("priceInfo", {})
-                    if p.get("lastPrice") is not None:
-                        rows.append({
-                            "ticker": t,
-                            "last_price": p.get("lastPrice"),
-                            "close": p.get("lastPrice"),
-                            "open": p.get("open"),
-                            "day_high": p.get("intraDayHighLow", {}).get("max"),
-                            "day_low": p.get("intraDayHighLow", {}).get("min"),
-                            "prev_close": p.get("previousClose"),
-                            "change_pct": p.get("pChange"),
-                            "timestamp": q.get("metadata", {}).get("lastUpdateTime"),
-                            "source": "nse_live",
-                        })
-                        continue
-                except Exception as exc:
-                    logger.warning("NSELive quote failed for %s (%s) — "
-                                   "trying yfinance", t, exc)
             row = self._yf_quote(t)
             if row is not None:
                 rows.append(row)
@@ -168,74 +141,129 @@ class UnifiedDataFetcher:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------ #
-    # Kite real-time quotes (data only — never places orders)
+    # ICICI Breeze real-time quotes (data only — never places orders)
 
-    _kite = None            # cached KiteConnect client
-    _kite_tried = False     # don't retry connect() every call in one process
+    _breeze = None
+    _breeze_tried = False
+    _breeze_symbol_map: dict | None = None   # NSE symbol -> Breeze stock_code
 
-    def _get_kite(self):
-        """Lazily build a KiteConnect client from secrets. Returns None if
-        credentials are missing or the daily access token is invalid."""
-        if self._kite is not None or DataFetcher_KITE_DISABLED:
-            return self._kite
-        if self.__class__._kite_tried:
-            return self.__class__._kite
-        self.__class__._kite_tried = True
+    def _get_breeze(self):
+        """Lazily authenticate a BreezeConnect client from secrets. None if
+        credentials are missing or the daily session_token is invalid."""
+        if self._breeze is not None or DataFetcher_BREEZE_DISABLED:
+            return self._breeze
+        if self.__class__._breeze_tried:
+            return self.__class__._breeze
+        self.__class__._breeze_tried = True
         try:
             import os
 
             from dotenv import load_dotenv
             load_dotenv(_ROOT / "config" / "secrets.env")
-            api_key = os.getenv("KITE_API_KEY")
-            token = os.getenv("KITE_ACCESS_TOKEN")
-            if not (api_key and token):
+            key = os.getenv("ICICI_BREEZE_API_KEY")
+            secret = os.getenv("ICICI_BREEZE_API_SECRET")
+            token = os.getenv("ICICI_BREEZE_SESSION_TOKEN")
+            if not (key and secret and token):
                 return None
-            from kiteconnect import KiteConnect
-            k = KiteConnect(api_key=api_key)
-            k.set_access_token(token)
-            k.ltp(["NSE:INFY"])  # cheap auth probe; raises on a bad token
-            self.__class__._kite = k
-            logger.info("Kite real-time quotes enabled")
-            return k
-        except Exception as exc:  # noqa: BLE001 — degrade to free sources
-            logger.info("Kite real-time unavailable (%s) — using NSELive/"
-                        "yfinance. Run scripts/kite_login.py for a fresh "
-                        "token.", str(exc)[:80])
+            # breeze_connect downloads its security-master zip at import
+            # time via bare urllib — the Python.org macOS build's bundled
+            # cert.pem lacks the issuing CA, so first import 500s on
+            # CERTIFICATE_VERIFY_FAILED without this. certifi (already a
+            # transitive dep) is what `requests` uses successfully.
+            import certifi
+            os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+            from breeze_connect import BreezeConnect
+            b = BreezeConnect(api_key=key)
+            b.generate_session(api_secret=secret, session_token=token)
+            b.get_quotes(stock_code="RELIND", exchange_code="NSE",
+                        product_type="cash")  # cheap auth probe
+            self.__class__._breeze = b
+            logger.info("ICICI Breeze real-time quotes enabled")
+            return b
+        except Exception as exc:  # noqa: BLE001 — degrade to Kite/free sources
+            logger.info("Breeze real-time unavailable (%s) — trying Kite/"
+                        "NSELive/yfinance. Session tokens expire daily.",
+                        str(exc)[:100])
             return None
 
-    @staticmethod
-    def _kite_symbol(ticker: str) -> str:
-        """RELIANCE.NS -> NSE:RELIANCE (Kite's exchange:tradingsymbol)."""
-        return f"NSE:{ticker[:-3] if ticker.endswith('.NS') else ticker}"
+    def _load_breeze_symbol_map(self) -> dict:
+        """NSE symbol -> Breeze stock_code, from ICICI's own security
+        master (cached locally; the file changes rarely). Matching by
+        plain string transforms (RELIANCE -> RELIND) isn't reliable —
+        confirmed by inspection that the master file's last column is
+        the actual NSE trading symbol, so join on that instead of guessing.
+        """
+        if self.__class__._breeze_symbol_map is not None:
+            return self.__class__._breeze_symbol_map
+        cache_path = _ROOT / "data" / "cache" / "icici_nse_scripmaster.csv"
+        if cache_path.exists():
+            df = pd.read_csv(cache_path, dtype=str)
+            mapping = dict(zip(df["symbol"], df["stock_code"]))
+            self.__class__._breeze_symbol_map = mapping
+            return mapping
+        import csv
+        import io
+        from urllib.request import urlopen
+        from zipfile import ZipFile
 
-    def _kite_quotes(self, tickers: list[str]) -> dict[str, dict]:
-        """Real-time quotes for as many tickers as Kite can serve. Empty
-        dict when Kite is unavailable — caller falls through to free sources."""
-        k = self._get_kite()
-        if k is None:
-            return {}
-        symmap = {self._kite_symbol(t): t for t in tickers}
+        mapping: dict[str, str] = {}
         try:
-            data = k.quote(list(symmap.keys()))
+            resp = urlopen(
+                "https://directlink.icicidirect.com/MotherAppMaster/"
+                "SecurityMaster.zip", timeout=30)
+            with ZipFile(io.BytesIO(resp.read())) as z, \
+                 z.open("NSEScripMaster.txt") as f:
+                reader = csv.reader(io.TextIOWrapper(f, encoding="utf-8"))
+                next(reader)  # header
+                for row in reader:
+                    if len(row) < 61:
+                        continue
+                    symbol, stock_code = row[-1].strip(), row[1].strip()
+                    if symbol:
+                        mapping[symbol] = stock_code
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"symbol": list(mapping), "stock_code": list(mapping.values())}
+                        ).to_csv(cache_path, index=False)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Kite quote batch failed (%s) — falling back", exc)
+            logger.warning("could not load Breeze symbol map (%s)", exc)
+        self.__class__._breeze_symbol_map = mapping
+        return mapping
+
+    def _breeze_quotes(self, tickers: list[str]) -> dict[str, dict]:
+        """Real-time quotes via ICICI Breeze. Empty dict when Breeze is
+        unavailable or a ticker has no Breeze stock_code mapping."""
+        b = self._get_breeze()
+        if b is None:
             return {}
+        symmap = self._load_breeze_symbol_map()
         out: dict[str, dict] = {}
-        for sym, q in data.items():
-            t = symmap.get(sym)
-            if t is None or q.get("last_price") is None:
+        for t in tickers:
+            bare = t[:-3] if t.endswith(".NS") else t
+            code = symmap.get(bare)
+            if not code:
                 continue
-            ohlc = q.get("ohlc") or {}
-            prev = ohlc.get("close")
-            last = q.get("last_price")
-            out[t] = {
-                "ticker": t, "last_price": last, "close": last,
-                "open": ohlc.get("open"), "day_high": ohlc.get("high"),
-                "day_low": ohlc.get("low"), "prev_close": prev,
-                "change_pct": ((last / prev - 1) * 100 if prev else None),
-                "timestamp": q.get("timestamp"),
-                "source": "kite_realtime",
-            }
+            try:
+                resp = b.get_quotes(stock_code=code, exchange_code="NSE",
+                                    product_type="cash")
+                rows = resp.get("Success") or []
+                q = next((r for r in rows if r.get("exchange_code") == "NSE"),
+                        rows[0] if rows else None)
+                if not q or q.get("ltp") is None:
+                    continue
+                last = float(q["ltp"])
+                prev = q.get("previous_close")
+                out[t] = {
+                    "ticker": t, "last_price": last, "close": last,
+                    "open": q.get("open"), "day_high": q.get("high"),
+                    "day_low": q.get("low"), "prev_close": prev,
+                    "change_pct": (q.get("ltp_percent_change")
+                                  if q.get("ltp_percent_change") is not None
+                                  else ((last / prev - 1) * 100 if prev else None)),
+                    "timestamp": q.get("ltt"),
+                    "source": "breeze_realtime",
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Breeze quote failed for %s (%s)", t, exc)
         return out
 
     # ------------------------------------------------------------------ #

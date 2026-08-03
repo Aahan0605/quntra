@@ -10,12 +10,21 @@ app = FastAPI(
     version="4.0.0"
 )
 
-# Enable CORS for the local terminal
+# CORS for the local terminal only.
+#
+# This was allow_origins=["*"] together with allow_credentials=True — a
+# combination browsers reject outright, and which states the intent to let
+# any website on the internet make credentialed calls to a trading API.
+# The terminal is served locally, so name the local origins explicitly.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:8000", "http://127.0.0.1:8000",
+        "null",  # file:// origin — quantra-terminal.html opened directly
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -33,5 +42,14 @@ def health_check():
     return {"status": "Quantra Engine Online", "version": "4.0.0", "ml_layer": "active"}
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
+
+    # Loopback by default. This was 0.0.0.0, which publishes an
+    # unauthenticated trading API to every device on the network — including
+    # whatever else is on the cafe wifi. There is no auth on any router, so
+    # binding publicly is equivalent to making it anonymous.
+    # Override deliberately (behind a reverse proxy with auth) via QUNTRA_API_HOST.
+    uvicorn.run("api.main:app", host=os.getenv("QUNTRA_API_HOST", "127.0.0.1"),
+                port=int(os.getenv("QUNTRA_API_PORT", "8000")), reload=True)

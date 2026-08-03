@@ -204,7 +204,7 @@ Your AI quantitative research organization
 /gate_report — Full day-by-day trading history (auto-sent at day 40)
 /obsidian — Regenerate the Obsidian knowledge vault from the database
 /start_trading — Start today's paper session from your phone (no laptop)
-/kite_token — Refresh the daily Kite token: /kite_token <request_token>
+/breeze_token — Refresh the daily ICICI Breeze session: /breeze_token <token>
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 PERFORMANCE
@@ -258,6 +258,28 @@ relevance to your portfolio, and updates research bias.
 ━━━━━━━━━━━━━━━━━━━━
 Capital preservation is the highest priority.
 No live trading until the 40-day paper gate passes."""
+
+
+def format_trade_details(trades: list[dict]) -> str:
+    """Per-trade entry/exit/P&L/reason breakdown — the /trades command's
+    formatter, shared with Hermes's automatic market-close push
+    (run_post_market_sequence) so both read from one implementation."""
+    if not trades:
+        return "📭 No trades executed today."
+    lines = ["📋 TODAY'S TRADES"]
+    for t in trades:
+        pnl = t.get("pnl")
+        emoji = "⬜" if pnl is None else ("✅" if pnl > 0 else "🔴")
+        exit_px = (f"₹{t['exit_price']:,.2f}" if t.get("exit_price")
+                   else "open")
+        pnl_str = f"₹{pnl:+,.2f}" if pnl is not None else "open"
+        lines.append(
+            f"{emoji} {t['ticker']} {t['direction']}\n"
+            f"   Entry ₹{t.get('entry_price') or 0:,.2f} → {exit_px}\n"
+            f"   Score {t.get('signal_score') or '?'}/12 · P&L {pnl_str}"
+            + (f" · {t.get('exit_reason')}" if t.get("exit_reason")
+               else ""))
+    return "\n".join(lines)
 
 
 class QuNtraTelegramBot:
@@ -628,23 +650,7 @@ class QuNtraTelegramBot:
 
     def cmd_trades(self) -> str:
         """Today's executed trades with entry/exit/P&L/reason."""
-        trades = self.hermes.brain.get_todays_trades()
-        if not trades:
-            return "📭 No trades executed today yet."
-        lines = ["📋 TODAY'S TRADES"]
-        for t in trades:
-            pnl = t.get("pnl")
-            emoji = "⬜" if pnl is None else ("✅" if pnl > 0 else "🔴")
-            exit_px = (f"₹{t['exit_price']:,.2f}" if t.get("exit_price")
-                       else "open")
-            pnl_str = f"₹{pnl:+,.2f}" if pnl is not None else "open"
-            lines.append(
-                f"{emoji} {t['ticker']} {t['direction']}\n"
-                f"   Entry ₹{t.get('entry_price') or 0:,.2f} → {exit_px}\n"
-                f"   Score {t.get('signal_score') or '?'}/12 · P&L {pnl_str}"
-                + (f" · {t.get('exit_reason')}" if t.get("exit_reason")
-                   else ""))
-        return "\n".join(lines)
+        return format_trade_details(self.hermes.brain.get_todays_trades())
 
     def cmd_signals(self) -> str:
         """All signals today: executed vs rejected with reasons."""
@@ -748,40 +754,34 @@ class QuNtraTelegramBot:
                 "The trading loop will execute up to 3 trades on its next "
                 "minute tick. Watch /open_positions.")
 
-    def cmd_kite_token(self, *args) -> str:
-        """Refresh the daily Kite access token from the phone. Send the
-        request_token from the login redirect URL:  /kite_token <token>."""
+    def cmd_breeze_token(self, *args) -> str:
+        """Refresh the daily ICICI Breeze session token from the phone.
+        Send the apisession value from the login redirect URL:
+        /breeze_token <session_token>."""
         token = (args[0] if args else "").strip()
         if not token:
-            from scripts.kite_login import _read_env  # login URL helper
-            try:
-                import os
-                from kiteconnect import KiteConnect
-                api_key = _read_env().get("KITE_API_KEY", "")
-                url = KiteConnect(api_key=api_key).login_url() if api_key \
-                    else "(set KITE_API_KEY first)"
-            except Exception:  # noqa: BLE001
-                url = "(kiteconnect unavailable)"
-            return ("Usage: /kite_token <request_token>\n\n"
+            import os
+
+            from src.integrations.breeze_session import login_url
+            api_key = os.getenv("ICICI_BREEZE_API_KEY", "")
+            url = login_url(api_key) if api_key else "(set ICICI_BREEZE_API_KEY first)"
+            return ("Usage: /breeze_token <session_token>\n\n"
                     "1. Open this login URL, approve:\n" + url + "\n"
-                    "2. Copy request_token from the redirect URL\n"
-                    "3. Send: /kite_token <that token>")
-        from src.integrations.kite_session import set_token, token_status
+                    "2. Copy the apisession= value from the redirect URL\n"
+                    "   (e.g. http://127.0.0.1:.../?apisession=12345678)\n"
+                    "3. Send: /breeze_token <that value>")
+        from src.integrations.breeze_session import set_token, token_status
         try:
-            at, how = set_token(token)
+            set_token(token)
         except Exception as e:  # noqa: BLE001
             return (f"⚠️ Couldn't use that token: {str(e)[:130]}\n\n"
-                    "Send the *request_token* from the login redirect URL "
-                    "(not the API secret). It's single-use and expires in "
-                    "minutes, so do it right after logging in. Send "
-                    "/kite_token with no argument to get a fresh login link.")
-        note = ("recognised as a ready access token" if how == "direct"
-                else "exchanged your request_token for an access token")
+                    "Send the *apisession* value from the login redirect "
+                    "URL, right after logging in. Send /breeze_token with "
+                    "no argument to get a fresh login link.")
         status = token_status()
-        return (f"✅ Kite token updated ({at[:6]}…) — {note}. Status: "
-                f"{status}.\nValid until ~07:30 IST tomorrow. (Real-time "
-                "quotes still need the paid market-data subscription; "
-                "without it, quotes stay on delayed yfinance.)")
+        return (f"✅ Breeze session updated ({token[:6]}…). Status: "
+                f"{status}.\nReal-time quotes should now be flowing "
+                "(falls back to delayed yfinance automatically if not).")
 
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""
@@ -853,8 +853,8 @@ class QuNtraTelegramBot:
         "gate_report",
         # obsidian: regenerate the markdown vault from the DB
         "obsidian",
-        # phone-run controls: start the session, refresh the Kite token
-        "start_trading", "kite_token",
+        # phone-run controls: start the session, refresh the Breeze session
+        "start_trading", "breeze_token",
     ]
 
     def run_polling(self):

@@ -42,6 +42,9 @@ REESTIMATE_EVERY = 63        # quarterly
 WEIGHT_CAP = 0.20
 
 
+from src.portfolio.target_weights import inverse_vol_weights  # noqa: E402
+
+
 def estimate_weights(returns: pd.DataFrame) -> dict[str, float]:
     """Pure inverse-volatility. Long-only, capped.
 
@@ -49,12 +52,13 @@ def estimate_weights(returns: pd.DataFrame) -> dict[str, float]:
     data it added +0.25%/yr return but 0.7% of extra max drawdown
     (-15.47% vs -14.81%), and the simpler portfolio passes all three
     Phase-0 targets. Simplicity + drawdown discipline win.
+
+    Delegates to src.portfolio.target_weights so this backtest and the
+    live allocator (src/portfolio/live_allocator.py) run the identical
+    function — a validated Sharpe number is only honest if nothing about
+    the strategy diverges between backtest and live.
     """
-    vol = returns.std()
-    inv_vol = 1.0 / vol.replace(0, np.nan)
-    w = inv_vol.fillna(0)
-    w = w.clip(upper=w.sum() * WEIGHT_CAP)
-    return (w / w.sum()).to_dict()
+    return inverse_vol_weights(returns, weight_cap=WEIGHT_CAP)
 
 
 def walk_forward(panel: pd.DataFrame) -> tuple[pd.Series, float]:

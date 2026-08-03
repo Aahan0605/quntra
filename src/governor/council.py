@@ -34,6 +34,7 @@ class SignalCouncil:
     """Deterministic, auditable scoring — every vote is logged."""
 
     MAX_TRADES_PER_DAY = 3
+    MAX_POSITION_PCT = 0.10    # hard cap on any single name, as % of capital
 
     def __init__(self, db_url: str | None = None, capital: float = 25_000.0):
         self.db_url = db_url
@@ -237,7 +238,11 @@ class SignalCouncil:
                 px = float(load_ticker(ticker)["close"].iloc[-1])
             except Exception:  # noqa: BLE001
                 continue
-            per_trade = self.capital / self.MAX_TRADES_PER_DAY
+            # capital/MAX_TRADES_PER_DAY alone put 33% of the book in one
+            # name — three positions were 88% of capital in three large caps
+            # that correlate to ~1 in a crash. Cap each position separately.
+            per_trade = min(self.capital / self.MAX_TRADES_PER_DAY,
+                            self.capital * self.MAX_POSITION_PCT)
             qty = max(1, int(per_trade / px)) if px < per_trade else 0
             if qty == 0:
                 logger.info("%s too expensive for per-trade budget "
@@ -280,12 +285,35 @@ class SignalCouncil:
 
     # ------------------------------------------------------------------ #
 
+    def _fdr_survivors(self) -> set[str] | None:
+        """Tickers whose edge survived the multiple-testing correction.
+
+        `passed_gate` is a per-model verdict; running it over 194 tickers
+        makes ~10 passes inevitable from noise. None means the audit has
+        not been run, in which case we fall back to the naive gate rather
+        than silently trading nothing.
+        """
+        audit = MODEL_DIR / "multiple_testing.json"
+        if not audit.exists():
+            logger.warning("no multiple_testing.json in %s — ML votes rest on "
+                           "the uncorrected gate; run src.ml.multiple_testing",
+                           MODEL_DIR)
+            return None
+        res = json.loads(audit.read_text())
+        return {s["ticker"] for s in res.get("survivors", [])}
+
     def _deployed_model(self, ticker: str):
         if not self._deployed_loaded:
+            survivors = self._fdr_survivors()
             summary = MODEL_DIR / "training_summary.json"
             if summary.exists():
                 for r in json.loads(summary.read_text()):
                     if not r.get("passed_gate"):
+                        continue
+                    if survivors is not None and r["ticker"] not in survivors:
+                        logger.info("%s passed the naive gate but not the FDR "
+                                    "correction — ML vote stays NEUTRAL",
+                                    r["ticker"])
                         continue
                     stem = r["ticker"].replace("&", "_")
                     try:

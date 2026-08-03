@@ -1,0 +1,31 @@
+{
+  "ticker": "TATASTEEL.NS",
+  "oos_accuracy": 0.5588,
+  "gate": 0.54,
+  "passed_gate": true,
+  "n_train": 950,
+  "n_oos": 238,
+  "features": [
+    "ret_1d",
+    "ret_5d",
+    "ret_20d",
+    "vol_10d",
+    "vol_20d",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "mom_10d",
+    "px_vs_sma20",
+    "px_vs_sma50",
+    "volume_z",
+    "hl_range"
+  ],
+  "trained_at": "2026-07-06T07:38:58.292075+00:00",
+  "runtime": {
+    "python": "3.10.4",
+    "numpy": "2.2.6",
+    "pandas": "2.3.3",
+    "sklearn": "1.7.2",
+    "xgboost": "3.2.0"
+  }
+}

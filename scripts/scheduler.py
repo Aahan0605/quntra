@@ -16,6 +16,7 @@ Jobs (IST):
 import argparse
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -59,6 +60,40 @@ def trading_day_only(fn):
     return wrapper
 
 
+# Two scheduler processes starting within the same cron-eligible minute
+# (e.g. a watchdog restart racing a manual one) each independently decide
+# a job is due and both fire it — happened for real: pre_market ran twice
+# 2 seconds apart on 2026-07-29. system_state is shared across processes,
+# so it's the only thing that can catch a cross-process race; an in-memory
+# guard on one process can't see the other process's timer.
+CRON_DEDUPE_WINDOW_SECONDS = 180
+
+
+def dedupe_cron_fire(fn, job_id: str, hermes: HermesCoordinator):
+    """Decorator: skip this cron-triggered call if the same job_id already
+    fired within CRON_DEDUPE_WINDOW_SECONDS, regardless of which process
+    fired it. Wraps the CRON registration only — manual triggers (e.g.
+    /start_trading calling hermes.run_pre_market_sequence() directly)
+    never go through this wrapper, so they always run on demand."""
+    def wrapper(*args, **kwargs):
+        key = f"cron_fired_{job_id}"
+        now = datetime.now(IST)
+        last = (hermes.get_system_state(key) or {}).get("at")
+        if last:
+            try:
+                elapsed = (now - datetime.fromisoformat(last)).total_seconds()
+                if elapsed < CRON_DEDUPE_WINDOW_SECONDS:
+                    logger.info("skipping duplicate cron fire for %s "
+                               "(last ran %ds ago)", job_id, int(elapsed))
+                    return None
+            except ValueError:
+                pass
+        hermes.set_system_state(key, {"at": now.isoformat()})
+        return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
 def build_hermes() -> HermesCoordinator:
     init_db()
     brain = QuNtraBrain()
@@ -88,21 +123,46 @@ def build_hermes() -> HermesCoordinator:
     capital = float(os.environ.get("DAILY_CAPITAL_INR", "25000"))
     council = SignalCouncil(capital=capital)
 
+    from src.portfolio.live_allocator import PassiveAllocator
+    from src.utils.universe import UNIVERSE
+    allocator = PassiveAllocator(universe=UNIVERSE, trader=trader,
+                                 capital=capital)
+
     return HermesCoordinator(
         brain=brain, trader=trader, fetcher=fetcher, telegram=telegram,
         circuit_breaker=DrawdownCircuitBreaker(telegram=telegram),
         loss_guard=ConsecutiveLossGuard(brain=brain, telegram=telegram,
                                         oms=trader),
-        council=council,
+        council=council, allocator=allocator,
     )
+
+
+HEARTBEAT_FILE = ROOT / "quntra.heartbeat"
+
+
+def _write_heartbeat() -> None:
+    """Prove the scheduler's event loop is still turning.
+
+    A hung-but-alive process keeps its PID, so a PID check alone reports
+    a healthy system while nothing runs (this exact failure went unnoticed
+    for five days). The watchdog treats a stale heartbeat as death.
+    """
+    HEARTBEAT_FILE.write_text(str(int(time.time())))
 
 
 def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
     jobs = [
+        ("heartbeat", _write_heartbeat, dict(minute="*")),
         ("pre_market", hermes.run_pre_market_sequence, dict(hour=6, minute=0)),
         ("arm_system", hermes.arm_system, dict(hour=8, minute=45)),
         ("observe_open", hermes.observe_market_open, dict(hour=9, minute=15)),
         ("start_session", hermes.start_trading_session, dict(hour=9, minute=30)),
+        # The live strategy (docs/CEO_REVIEW.md Path A) — inverse-vol
+        # weights, vetoes applied, crash-scaled. Runs Monday pre-open;
+        # Rebalancer's own weekly/3%-drift/20%-turnover gates decide
+        # whether anything actually trades.
+        ("allocator_rebalance", hermes.run_allocator_rebalance,
+         dict(day_of_week="mon", hour=9, minute=20)),
         ("market_loop", hermes.run_market_session,
          dict(minute="*/1", hour="9-14")),
         ("close_mgmt", hermes.begin_close_management, dict(hour=14, minute=30)),
@@ -128,16 +188,25 @@ def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
         # day's trades and reports have settled. Read-only; runs daily
         # (weekends too) so the vault's report archive stays current.
         ("obsidian_sync", hermes.sync_obsidian, dict(hour=17, minute=20)),
-        # Kite tokens expire ~07:30 IST daily — check just after and ping
-        # the operator if a re-login is needed. Every day; no-op alert when
-        # Kite isn't configured, so it never nags during pure paper trading.
-        ("kite_token_check", hermes.check_kite_token, dict(hour=7, minute=45)),
+        # ICICI Breeze session tokens expire daily — check ahead of market
+        # open and ping the operator if a re-login is needed. Every day;
+        # no-op alert when Breeze isn't configured, so it never nags during
+        # pure paper trading.
+        ("breeze_token_check", hermes.check_breeze_token,
+         dict(hour=7, minute=45)),
     ]
     market_hour_jobs = {"pre_market", "arm_system", "observe_open",
                         "start_session", "market_loop", "close_mgmt",
-                        "post_market", "eod_report"}
+                        "post_market", "eod_report", "allocator_rebalance"}
+    # heartbeat/market_loop fire every minute by design — a dedupe window
+    # would suppress their normal cadence, not just a genuine double-fire.
+    # Every other job runs at most once a day, so a 3-minute window can
+    # only ever catch the cross-process race, never a legitimate re-fire.
+    NO_DEDUPE = {"heartbeat", "market_loop"}
     for job_id, fn, cron in jobs:
         target = trading_day_only(fn) if job_id in market_hour_jobs else fn
+        if job_id not in NO_DEDUPE:
+            target = dedupe_cron_fire(target, job_id, hermes)
         scheduler.add_job(target, CronTrigger(timezone=IST, **cron),
                           id=job_id, name=job_id, misfire_grace_time=300,
                           coalesce=True, max_instances=1)
@@ -153,7 +222,7 @@ def dry_run() -> int:
     scheduler = BlockingScheduler(timezone=IST)
     hermes = _Stub()
     ids = register_jobs(scheduler, hermes)
-    assert len(ids) == 17, f"expected 17 jobs, got {len(ids)}"
+    assert len(ids) == 19, f"expected 19 jobs, got {len(ids)}"
     for job in scheduler.get_jobs():
         nxt = job.trigger.get_next_fire_time(None, datetime.now(IST))
         assert nxt is not None, f"job {job.id} would never fire"
@@ -169,9 +238,47 @@ def dry_run() -> int:
     assert not is_trading_day(closed), "Republic Day should be closed"
     assert is_trading_day(open_day), "2026-07-03 should be a trading day"
     print("  holiday calendar OK (Republic Day closed, regular Friday open)")
-    print("DRY RUN PASSED — 17 jobs registered, IST-correct, holiday-aware")
-    print("--dry-run complete: 17/17 jobs passed")
+    print(f"DRY RUN PASSED — {len(ids)} jobs registered, IST-correct, "
+         f"holiday-aware")
+    print(f"--dry-run complete: {len(ids)}/{len(ids)} jobs passed")
     return 0
+
+
+def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
+    """Minimal HTTP healthcheck for cloud platforms (Railway etc.).
+
+    Railway's restart policy only detects a process EXIT, not a hang —
+    exactly the failure mode that went undetected for 5 days on the Mac
+    (caught there by watchdog.py polling this same heartbeat file; there
+    is no watchdog process in a cloud deploy). Only starts when PORT is
+    set, so local Mac runs are completely unaffected.
+    """
+    import os
+    port = os.environ.get("PORT")
+    if not port:
+        return
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's naming
+            try:
+                age = int(time.time()) - int(HEARTBEAT_FILE.read_text().strip())
+            except (FileNotFoundError, ValueError):
+                age = None
+            healthy = age is not None and age < max_stale_seconds
+            self.send_response(200 if healthy else 503)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"heartbeat_age={age}".encode())
+
+        def log_message(self, *a):  # noqa: A002 — silence per-request noise
+            pass
+
+    server = http.server.HTTPServer(("0.0.0.0", int(port)), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Healthcheck server listening on :%s (Railway restarts on "
+               "a stale/failed check)", port)
 
 
 def main() -> int:
@@ -194,6 +301,11 @@ def main() -> int:
         logging.getLogger().addHandler(fh)
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # After env load and handler setup, so it sees live values and covers
+    # every handler including the log file.
+    from src.utils.log_redaction import install_redaction
+    install_redaction()
 
     if args.dry_run:
         return dry_run()
@@ -229,6 +341,7 @@ def main() -> int:
     scheduler.add_listener(_record_missed, EVENT_JOB_MISSED)
     logger.info("QuNtra scheduler starting — %d jobs, timezone IST",
                 len(scheduler.get_jobs()))
+    _start_healthcheck_server()
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

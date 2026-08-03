@@ -131,11 +131,25 @@ def test_pre_market_builds_watchlist(hermes):
     assert (hermes.get_system_state("oms") or {}).get("enabled")
 
 
-def test_market_session_executes_signals(hermes):
+def test_market_session_executes_signals(hermes, monkeypatch):
+    # Signal-council trading is off by default since
+    # scripts/backtest_signal_council.py showed it loses to buy-and-hold
+    # NIFTY over 5 real years (docs/CEO_REVIEW.md) — this test explicitly
+    # opts back in to exercise the execution path itself.
+    monkeypatch.setenv("ENABLE_SIGNAL_COUNCIL_TRADING", "true")
     hermes.run_pre_market_sequence()
     actions = hermes.run_market_session()
     assert len(actions["executed"]) == 2
     assert hermes.trader.orders[0]["ticker"].endswith(".NS")
+
+
+def test_market_session_signal_council_disabled_by_default(hermes, monkeypatch):
+    monkeypatch.delenv("ENABLE_SIGNAL_COUNCIL_TRADING", raising=False)
+    hermes.run_pre_market_sequence()
+    actions = hermes.run_market_session()
+    assert actions["executed"] == []
+    assert any("signal-council trading disabled" in s
+              for s in actions["skipped"])
 
 
 def test_market_session_respects_oms_disabled(hermes):
@@ -160,10 +174,31 @@ def test_post_market_updates_credibility(hermes):
     hermes.run_post_market_sequence()
     assert hermes.brain.get_agent_credibility("technical") == pytest.approx(1.05)
     assert hermes.brain.get_agent_credibility("sentiment") == pytest.approx(0.95)
-    # pre-market intelligence report + EOD daily report
-    assert len(hermes.telegram.messages) == 2
+    # pre-market intelligence + market-close trade details + EOD daily report
+    assert len(hermes.telegram.messages) == 3
     assert any("PRE-MARKET" in m for m in hermes.telegram.messages)
+    assert any("TODAY'S TRADES" in m or "No trades executed" in m
+              for m in hermes.telegram.messages)
     assert any("DAILY REPORT" in m for m in hermes.telegram.messages)
+
+
+def test_post_market_pushes_real_trade_details_at_close(hermes):
+    """The market-close push (docs: sent the moment the market closes, not
+    the 17:00 compact summary) must carry actual per-trade content — entry,
+    exit, P&L, exit reason — not just fire an empty notification."""
+    hermes.brain.remember_trade({
+        "signal_hash": "TCS-close-test", "ticker": "TCS.NS",
+        "direction": "LONG", "entry_price": 4000.0, "exit_price": 4100.0,
+        "quantity": 2, "pnl": 190.0, "exit_reason": "TAKE_PROFIT",
+        "signal_score": 10, "is_paper": True,
+    })
+    hermes.run_post_market_sequence()
+    trade_msg = next(m for m in hermes.telegram.messages
+                     if "TODAY'S TRADES" in m)
+    assert "TCS.NS" in trade_msg
+    assert "4,000.00" in trade_msg and "4,100.00" in trade_msg
+    assert "TAKE_PROFIT" in trade_msg
+    assert "190.00" in trade_msg or "+190" in trade_msg
 
 
 def test_pre_market_calls_all_research_agents(hermes):

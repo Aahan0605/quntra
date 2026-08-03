@@ -28,7 +28,11 @@ pytz==2026.2
 python-dotenv==1.2.2
 
 # Broker + alerts
-kiteconnect==5.0.1
+kiteconnect==5.0.1         # unused for market data (no paid data sub on this
+                           # account) — kept for KiteOMS, dormant Phase-3 code
+breeze-connect==1.0.69     # ICICI Breeze — the real-time market-data source
+certifi                    # Breeze's security-master download needs a real
+                           # cert bundle; Python.org's macOS build lacks one
 ta==0.11.0
 pyfolio-reloaded==0.9.9
 mlflow-skinny

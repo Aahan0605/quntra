@@ -51,6 +51,7 @@ class HermesCoordinator:
         db_url: str | None = None,
         research_team: dict | None = None,   # {name: agent} override for tests
         knowledge=None,
+        allocator=None,         # PassiveAllocator — the live trading strategy
     ):
         self.brain = brain
         self.trader = trader
@@ -62,6 +63,7 @@ class HermesCoordinator:
         self.db_url = db_url
         self._research_team = research_team
         self._knowledge = knowledge
+        self.allocator = allocator
 
     # ------------------------------------------------------------------ #
     # Lazily-built teams (injectable for tests)
@@ -117,12 +119,20 @@ class HermesCoordinator:
         now = datetime.now(IST)
         result = {"started_at": now.isoformat(), "steps": [], "watchlist": []}
 
+        # 0. Regime — was read here from system_state but never written
+        # anywhere (the pre-market report said "MARKET REGIME: UNKNOWN"
+        # unconditionally). Compute and persist it before ctx is built so
+        # today's report and research team see today's regime, not a
+        # permanently stale default.
+        regime = self._safe(self.compute_regime, "regime", result) or {}
+        if regime:
+            self.set_system_state("regime", regime)
+
         # 1-4. Research team: news, macro, geopolitical, earnings/events
         outputs = {}
         watch = (self.get_system_state("premarket") or {}).get("watchlist", [])
         ctx = {"date": now.date().isoformat(), "watchlist": watch,
-               "regime": (self.get_system_state("regime") or {}).get(
-                   "state", "UNKNOWN")}
+               "regime": regime.get("state", "UNKNOWN")}
         for name in ("news_agent", "macro_agent", "geopolitical_agent",
                      "fundamental_agent", "sector_agent",
                      "company_analysis_agent"):
@@ -224,15 +234,37 @@ class HermesCoordinator:
         if self.loss_guard is not None and self.loss_guard.halted:
             can_trade = False
             actions["skipped"].append("loss guard halt")
+        crash = self.crash_risk()
+        actions["crash_risk"] = crash
+        if crash and crash["exposure_multiplier"] == 0.0:
+            can_trade = False
+            actions["skipped"].append(
+                f"crash regime {crash['regime']} (score {crash['score']})")
 
         # 4. Execute passing signals
+        # scripts/backtest_signal_council.py replayed this exact scoring
+        # engine over 5 real years: -0.51% total return vs +52.55% for
+        # buy-and-hold NIFTY. Off by default — see docs/CEO_REVIEW.md.
+        # Only an explicit opt-in re-enables per-ticker stock-picking.
+        if not self._signal_council_trading_enabled():
+            can_trade = False
+            if signals:
+                actions["skipped"].append(
+                    "signal-council trading disabled (backtested negative "
+                    "— docs/CEO_REVIEW.md); set "
+                    "ENABLE_SIGNAL_COUNCIL_TRADING=true to override")
         if can_trade:
             regime = (self.get_system_state("regime") or {}).get("state")
+            # Scale size by the crash-risk band. Below CRISIS the gate does
+            # not block, but ELEVATED/HIGH should not be traded at full size.
+            exposure = (crash or {}).get("exposure_multiplier", 1.0)
             for sig in signals:
-                self.brain.remember_signal({**sig, "executed": True})
+                qty = max(1, int(sig.get("qty", 1) * exposure))
+                self.brain.remember_signal({**sig, "executed": True,
+                                            "qty": qty})
                 trade = self.trader.place_order(
                     ticker=sig["ticker"], direction=sig["direction"],
-                    qty=sig.get("qty", 1), signal_hash=sig.get("signal_hash"),
+                    qty=qty, signal_hash=sig.get("signal_hash"),
                     score=sig.get("score"), regime=sig.get("regime", regime),
                     agent_votes=sig.get("agent_votes"),
                     reasoning=sig.get("reasoning"),
@@ -250,6 +282,91 @@ class HermesCoordinator:
             self._safe(self.trader.manage_positions, "manage_positions", actions)
         return actions
 
+    @staticmethod
+    def _signal_council_trading_enabled() -> bool:
+        import os
+        return os.environ.get("ENABLE_SIGNAL_COUNCIL_TRADING",
+                              "false").lower() == "true"
+
+    def run_allocator_rebalance(self) -> dict:
+        """Weekly: the live strategy (docs/CEO_REVIEW.md Path A). Vetoed
+        tickers excluded, weights scaled by the crash-risk exposure band,
+        traded through PaperTrader.adjust_position — no per-ticker stops,
+        managed entirely by weight drift (Rebalancer's own 3%/20% caps)."""
+        if self.allocator is None:
+            return {"skipped": "no allocator configured"}
+        from src.utils.cache_loader import load_close_panel
+
+        actions: dict = {"steps": []}
+        panel = self._safe(lambda: load_close_panel(self.allocator.universe),
+                           "load_close_panel", actions)
+        if panel is None:
+            return {"skipped": "no price panel", "steps": actions["steps"]}
+        crash = self.crash_risk()
+        exposure = (crash or {}).get("exposure_multiplier", 1.0)
+        result = self._safe(
+            lambda: self.allocator.rebalance(panel, exposure_multiplier=exposure),
+            "allocator_rebalance", actions) or {}
+        result["crash_risk"] = crash
+        result["steps"] = actions["steps"]
+        return result
+
+    # Cheapest correct source: the benchmark CSV the fetcher already
+    # maintains. No new data dependency, no network call on the 60s tick.
+    _BENCH_FILES = ("NIFTY_LONG.csv", "NIFTY50_BENCH.csv")
+
+    def compute_regime(self) -> dict | None:
+        """BULL_TRENDING / BULL_VOLATILE / SIDEWAYS / BEAR_TRENDING /
+        BEAR_VOLATILE / CRISIS — see src/risk/regime.py for why this is a
+        rule-based classifier and not the HMM the code once assumed would
+        exist. None (not a fabricated UNKNOWN state) when the benchmark
+        is unavailable — an absent series is not evidence of anything."""
+        from pathlib import Path
+
+        import pandas as pd
+
+        from src.risk.regime import current_regime
+
+        cache = Path(__file__).resolve().parents[2] / "data" / "cache"
+        for name in self._BENCH_FILES:
+            path = cache / name
+            if not path.exists():
+                continue
+            try:
+                df = pd.read_csv(path, index_col=0, parse_dates=True)
+                col = "Close" if "Close" in df.columns else "close"
+                return current_regime(df[col].dropna())
+            except Exception as e:  # noqa: BLE001
+                logger.error("compute_regime read failed for %s: %s", name, e)
+        logger.warning("no benchmark series — regime stays unset")
+        return None
+
+    def crash_risk(self) -> dict | None:
+        """Market-wide crash regime, or None if the benchmark is unavailable.
+
+        Returning None (rather than a fabricated CALM) matters: an absent
+        benchmark is an unknown market, and unknown must never read as safe.
+        """
+        from pathlib import Path
+
+        import pandas as pd
+
+        from src.risk.crash_risk import assess
+
+        cache = Path(__file__).resolve().parents[2] / "data" / "cache"
+        for name in self._BENCH_FILES:
+            path = cache / name
+            if not path.exists():
+                continue
+            try:
+                df = pd.read_csv(path, index_col=0, parse_dates=True)
+                col = "Close" if "Close" in df.columns else "close"
+                return assess(df[col].dropna())
+            except Exception as e:  # noqa: BLE001 — never block the tick
+                logger.error("crash_risk read failed for %s: %s", name, e)
+        logger.warning("no benchmark series — crash gate inactive")
+        return None
+
     def run_post_market_sequence(self) -> dict:
         """15:30–18:00 IST: reconcile, journal, score agents, report."""
         now = datetime.now(IST)
@@ -258,6 +375,11 @@ class HermesCoordinator:
         # 1-2. Reconcile fills + compute P&L
         if hasattr(self.trader, "reconcile"):
             self._safe(self.trader.reconcile, "reconcile", result)
+
+        # Market-close push: full per-trade detail (entry/exit/P&L/reason),
+        # sent the moment this sequence runs (15:30 IST) rather than
+        # waiting for the 17:00 compact EOD summary.
+        self._safe(self._send_trade_details, "trade_details", result)
 
         # 3-4. Score agent council accuracy -> update credibility
         if self.council is not None and hasattr(self.council, "score_day"):
@@ -304,6 +426,12 @@ class HermesCoordinator:
     def _send_daily_report(self) -> None:
         from src.reporting import DailyReport
         DailyReport(self.db_url, telegram=self.telegram).generate()
+
+    def _send_trade_details(self) -> None:
+        if self.telegram is None:
+            return
+        from src.alerts.telegram_bot import format_trade_details
+        self.telegram.send(format_trade_details(self.brain.get_todays_trades()))
 
     def run_overnight_batch(self) -> dict:
         """22:00–06:00 IST: learn from trades, research, optimize, refit."""
@@ -419,21 +547,20 @@ class HermesCoordinator:
             logger.exception("Obsidian sync failed")
             return {"error": str(e)}
 
-    def check_kite_token(self) -> str:
-        """Morning check: Kite access tokens expire ~07:30 IST daily. Alert
+    def check_breeze_token(self) -> str:
+        """Morning check: ICICI Breeze session tokens expire daily. Alert
         the operator on Telegram if a re-login is needed. No-ops (no alert)
-        when Kite isn't configured, so it's harmless during paper trading."""
-        from src.integrations.kite_session import token_status
+        when Breeze isn't configured, so it's harmless during paper trading."""
+        from src.integrations.breeze_session import token_status
         status = token_status()
         if status == "expired" and self.telegram is not None:
             self.telegram.send(
-                "🔑 Kite access token EXPIRED (they reset ~07:30 IST daily).\n"
+                "🔑 ICICI Breeze session EXPIRED (resets daily).\n"
                 "Real-time quotes are on delayed yfinance until you refresh:\n"
-                "  python3 scripts/kite_login.py --login-url\n"
-                "then log in and run --request-token <token>.\n"
+                "Send /breeze_token with no argument for a fresh login link.\n"
                 "(Paper trading keeps running on delayed data meanwhile.)")
         elif status.startswith("error") and self.telegram is not None:
-            logger.warning("Kite token check: %s", status)
+            logger.warning("Breeze token check: %s", status)
         return status
 
     # ------------------------------------------------------------------ #
@@ -601,8 +728,12 @@ class HermesCoordinator:
         "eod_report": lambda h: h.send_eod_report(),
         "gate_completion_check": lambda h: h.check_gate_completion(),
         "obsidian_sync": lambda h: h.sync_obsidian(),
+        # The live strategy since 2026-07-28 (docs/CEO_REVIEW.md) — a
+        # missed Monday rebalance must not silently wait a full week.
+        "allocator_rebalance": lambda h: h.run_allocator_rebalance(),
     }
-    _MARKET_HOUR_CATCHUP = {"close_mgmt", "post_market", "eod_report"}
+    _MARKET_HOUR_CATCHUP = {"close_mgmt", "post_market", "eod_report",
+                            "allocator_rebalance"}
 
     def handle_missed_job(self, job_id: str, scheduled_at_iso: str) -> None:
         """Called by the scheduler's EVENT_JOB_MISSED listener."""

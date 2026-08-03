@@ -113,10 +113,11 @@ def _trader_with_position(entry=100.0, days_old=0):
     trade = trader.place_order("TCS.NS", "LONG", qty=1, price=entry,
                                signal_hash="h1")
     assert trade["status"] == "FILLED"
-    if days_old:
-        pos = trader._positions["h1"]
-        pos["entry_time"] = datetime.now(timezone.utc) - timedelta(
-            days=days_old)
+    # Age the position past PaperTrader.MIN_HOLD_MINUTES so take-profit and
+    # time-stop are eligible; a freshly opened trade is deliberately held.
+    # The stop-loss is exempt from that window, so this doesn't mask it.
+    trader._positions["h1"]["entry_time"] = (
+        datetime.now(timezone.utc) - timedelta(days=days_old, minutes=20))
     return trader
 
 

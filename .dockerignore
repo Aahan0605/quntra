@@ -1,0 +1,15 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/*.log
+*.pid
+*.heartbeat
+data/backups/
+data/reports/
+data/obsidian_vault/
+node_modules/
+.DS_Store
+config/secrets.env
+.env

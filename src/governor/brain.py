@@ -65,6 +65,72 @@ class QuNtraBrain:
             s.flush()
             return row.id
 
+    def close_trade(self, signal_hash: str, exit_data: dict) -> bool:
+        """Close an open trade in place.
+
+        Exits used to be written as a *second* row keyed `<hash>:exit`,
+        which left the original row reading as open forever — every P&L
+        and open-position query double-counted. This updates the row that
+        is actually open. Returns False if there was nothing to close.
+        """
+        allowed = {c.name for c in Trade.__table__.columns}
+        with self._session() as s:
+            row = s.execute(
+                select(Trade)
+                .where(Trade.signal_hash == signal_hash)
+                .where(Trade.exit_time.is_(None))
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            for k, v in exit_data.items():
+                if k in allowed and k not in ("id", "signal_hash"):
+                    setattr(row, k, v)
+            return True
+
+    def update_position_size(self, signal_hash: str, quantity: int,
+                             entry_price: float | None = None) -> bool:
+        """Persist a rebalance's new size on the OPEN row — never a second
+        insert. `signal_hash` has a unique DB constraint; remember_trade()
+        always inserts, so calling it twice on the same hash (e.g. two
+        rebalances of the same position) would violate that constraint.
+        """
+        with self._session() as s:
+            row = s.execute(
+                select(Trade)
+                .where(Trade.signal_hash == signal_hash)
+                .where(Trade.exit_time.is_(None))
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.quantity = quantity
+            if entry_price is not None:
+                row.entry_price = entry_price
+            return True
+
+    def get_open_positions(self, is_paper: bool = True) -> list[dict]:
+        """Every trade with no exit — the source of truth across restarts."""
+        with self._session() as s:
+            rows = s.execute(
+                select(Trade)
+                .where(Trade.exit_time.is_(None))
+                .where(Trade.is_paper == is_paper)
+                .order_by(Trade.entry_time.asc())
+            ).scalars().all()
+            return [
+                {
+                    "signal_hash": r.signal_hash,
+                    "ticker": r.ticker,
+                    "direction": r.direction,
+                    "entry_price": float(r.entry_price) if r.entry_price else None,
+                    "quantity": r.quantity,
+                    "entry_time": r.entry_time,
+                    "signal_score": r.signal_score,
+                    "regime": r.regime,
+                    "is_paper": r.is_paper,
+                }
+                for r in rows
+            ]
+
     # ------------------------------------------------------------------ #
     # Recall
 

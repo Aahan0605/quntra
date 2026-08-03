@@ -77,7 +77,9 @@ FAKE_FEED = [
 
 def test_news_agent_filters_and_scores(db_url):
     with patch("src.agents.research.news_agent.fetch_rss",
-               return_value=FAKE_FEED):
+               return_value=FAKE_FEED), \
+         patch("src.agents.research.news_agent.fetch_newsapi",
+              return_value=[]):
         out = NewsAgent(db_url).run({"watchlist": ["RELIANCE.NS"]})
     assert out.ok
     titles = [f["title"] for f in out.findings]
@@ -90,10 +92,32 @@ def test_news_agent_filters_and_scores(db_url):
 
 
 def test_news_agent_no_feeds(db_url):
-    with patch("src.agents.research.news_agent.fetch_rss", return_value=[]):
+    # fetch_newsapi is also mocked: NEWSAPI_KEY can leak into os.environ
+    # from src/utils/data_fetcher.py's load_dotenv() side effect in an
+    # earlier test, which would otherwise make this a live network call.
+    with patch("src.agents.research.news_agent.fetch_rss", return_value=[]), \
+         patch("src.agents.research.news_agent.fetch_newsapi", return_value=[]):
         out = NewsAgent(db_url).run({})
     assert out.confidence == 0.0
     assert "No news feeds reachable" in out.summary
+
+
+def test_relevance_does_not_substring_match_ordinary_words():
+    """'nse' is a substring of 'response'/'sense'/'expense'; 'dii' of
+    'radii'; 'itc' of 'kitchen' — naive `kw in text` flagged all of these
+    as market-relevant. Must require whole-word matches."""
+    for text in ["it made no sense to sell", "measured in radii",
+                "clean the kitchen", "in response to the crisis",
+                "at great expense to shareholders"]:
+        rel, tickers = score_relevance(text)
+        assert rel == 0.0 and tickers == [], f"false positive on: {text!r}"
+
+
+def test_relevance_still_matches_real_company_and_market_terms():
+    rel, tickers = score_relevance("Reliance Industries posts record profit")
+    assert rel == 0.7 and tickers == ["RELIANCE.NS"]
+    rel2, _ = score_relevance("NSE extends trading hours amid volatility")
+    assert rel2 == 0.55
 
 
 def test_sentiment_and_relevance_helpers():
@@ -118,7 +142,9 @@ def test_news_agent_freshness_and_dedup(db_url):
          "link": "c", "published": "", "published_dt": stale},  # too old
     ]
     with patch("src.agents.research.news_agent.fetch_rss",
-               return_value=feed):
+               return_value=feed), \
+         patch("src.agents.research.news_agent.fetch_newsapi",
+              return_value=[]):
         out = NewsAgent(db_url).run({})
     titles = [f["title"] for f in out.findings]
     # duplicate collapsed to one, stale item dropped

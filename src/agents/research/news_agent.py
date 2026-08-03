@@ -8,7 +8,10 @@ Phase 3). Only items with relevance > 0.5 are stored.
 
 from __future__ import annotations
 
-from src.agents.research.base import BaseResearchAgent, ResearchOutput, fetch_rss
+import re
+
+from src.agents.research.base import (BaseResearchAgent, ResearchOutput,
+                                      fetch_newsapi, fetch_rss)
 from src.utils.universe import UNIVERSE, nse_symbol
 
 FEEDS = {
@@ -19,6 +22,9 @@ FEEDS = {
 }
 
 MAX_AGE_HOURS = 18   # stale headlines must not steer today's bias
+
+NEWSAPI_QUERY = ("NIFTY OR Sensex OR NSE India OR BSE India OR "
+                 "\"Indian stock market\" OR RBI")
 
 POSITIVE_WORDS = {
     "surge", "rally", "gain", "jump", "record", "upgrade", "beat", "profit",
@@ -53,6 +59,16 @@ COMPANY_KEYWORDS = {
 MARKET_KEYWORDS = {"nifty", "sensex", "nse", "bse", "fii", "dii", "rbi",
                    "sebi", "rupee", "market"}
 
+# Word-boundary matching, not substring: "nse" is a substring of "response",
+# "sense", "expense"; "dii" of "radii"; "itc" of "kitchen"/"criticism". Naive
+# `kw in text` matching flagged ordinary English words as market-relevant.
+# \b works on the whole phrase (spaces included), so multi-word keywords
+# like "state bank" and "sun pharma" still require the full phrase.
+_COMPANY_PATTERNS = {kw: re.compile(r"\b" + re.escape(kw) + r"\b")
+                    for kw in COMPANY_KEYWORDS}
+_MARKET_PATTERNS = {kw: re.compile(r"\b" + re.escape(kw) + r"\b")
+                   for kw in MARKET_KEYWORDS}
+
 
 def score_sentiment(text: str) -> float:
     """Keyword + phrase sentiment in [-1, 1]. Phrases weigh double."""
@@ -70,13 +86,14 @@ def score_sentiment(text: str) -> float:
 def score_relevance(text: str, watchlist: list[str] | None = None) -> tuple[float, list[str]]:
     """Relevance in [0, 1] + matched universe tickers."""
     low = text.lower()
-    tickers = sorted({tck for kw, tck in COMPANY_KEYWORDS.items() if kw in low})
+    tickers = sorted({tck for kw, tck in COMPANY_KEYWORDS.items()
+                     if _COMPANY_PATTERNS[kw].search(low)})
     relevance = 0.0
     if tickers:
         relevance = 0.7
         if watchlist and any(t in watchlist for t in tickers):
             relevance = 0.9
-    elif any(kw in low for kw in MARKET_KEYWORDS):
+    elif any(pat.search(low) for pat in _MARKET_PATTERNS.values()):
         relevance = 0.55
     return relevance, tickers
 
@@ -86,9 +103,14 @@ class NewsAgent(BaseResearchAgent):
     description = "scans trusted Indian financial news RSS feeds"
     note_type = "news"
 
-    def __init__(self, db_url: str | None = None, feeds: dict | None = None):
+    def __init__(self, db_url: str | None = None, feeds: dict | None = None,
+                newsapi_key: str | None = None):
         super().__init__(db_url)
         self.feeds = feeds or FEEDS
+        # None -> read NEWSAPI_KEY from the environment at call time;
+        # fetch_newsapi() itself no-ops when nothing is configured, so
+        # this source degrades to "just RSS" with no special-casing here.
+        self.newsapi_key = newsapi_key
 
     def run(self, context: dict) -> ResearchOutput:
         import hashlib
@@ -98,8 +120,15 @@ class NewsAgent(BaseResearchAgent):
         cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
         items, sources_used = [], []
         seen_titles: set[str] = set()
-        for source, url in self.feeds.items():
-            entries = fetch_rss(url, limit=25)
+
+        by_source = [(source, fetch_rss(url, limit=25))
+                    for source, url in self.feeds.items()]
+        # NewsAPI alongside RSS, same downstream pipeline (dedup, freshness,
+        # relevance, sentiment) — a second source, not a different one.
+        by_source.append(("newsapi", fetch_newsapi(NEWSAPI_QUERY,
+                                                    api_key=self.newsapi_key)))
+
+        for source, entries in by_source:
             if entries:
                 sources_used.append(source)
             for e in entries:

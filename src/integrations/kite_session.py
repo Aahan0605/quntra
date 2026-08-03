@@ -23,14 +23,7 @@ logger = logging.getLogger("quntra.kite")
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-
-def _write_secret(key: str, value: str) -> None:
-    """Upsert one KEY=value line in config/secrets.env (gitignored)."""
-    env = _ROOT / "config" / "secrets.env"
-    lines = env.read_text().splitlines() if env.exists() else []
-    lines = [l for l in lines if not l.startswith(f"{key}=")]
-    lines.append(f"{key}={value}")
-    env.write_text("\n".join(lines) + "\n")
+from src.utils.secrets_file import write_secret as _write_secret  # noqa: E402
 
 
 def exchange_request_token(request_token: str) -> str:
@@ -103,13 +96,12 @@ def set_token(token: str) -> tuple[str, str]:
 
 
 def _refresh_caches(access_token: str) -> None:
+    # UnifiedDataFetcher no longer has a Kite quote path (removed —
+    # yfinance + ICICI Breeze only), so there's no client cache to reset
+    # here anymore; kept as a no-op call site so KiteOMS (Phase 3 live
+    # order execution) can still refresh its own token without this
+    # module needing to know about it.
     os.environ["KITE_ACCESS_TOKEN"] = access_token
-    try:
-        from src.utils.data_fetcher import UnifiedDataFetcher
-        UnifiedDataFetcher._kite = None
-        UnifiedDataFetcher._kite_tried = False
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def token_status() -> str:

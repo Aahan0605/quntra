@@ -1,0 +1,35 @@
+#!/bin/bash
+# quntra start|stop|status|logs — one command for the whole system.
+#
+# The watchdog already supervises the scheduler and the Telegram bot and
+# restarts the Postgres container, so "start" just starts the watchdog and
+# lets it bring up everything else. No separate orchestration to keep in sync.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+
+PY=./venv/bin/python
+PIDS="watchdog.pid quntra.pid telegram_bot.pid"
+
+alive() { [ -f "$1" ] && ps -p "$(cat "$1")" >/dev/null 2>&1; }
+
+case "${1:-status}" in
+  start)
+    alive watchdog.pid && { echo "already running — 'quntra status' for details"; exit 0; }
+    grep -q '^LIVE_TRADING=false' .env || { echo "REFUSING: LIVE_TRADING is not false in .env"; exit 1; }
+    ./scripts/keep_mac_awake.sh >/dev/null 2>&1 || true
+    nohup $PY scripts/watchdog.py >> logs/watchdog.log 2>&1 &
+    echo $! > watchdog.pid
+    echo "watchdog up (PID $!) — scheduler + bot follow within 60s."
+    echo "Then drive it from Telegram: /start_trading"
+    ;;
+  stop)
+    for p in $PIDS; do alive "$p" && kill "$(cat "$p")" 2>/dev/null && echo "stopped $p"; done
+    ;;
+  status)
+    for p in $PIDS; do alive "$p" && echo "UP   $p ($(cat "$p"))" || echo "DOWN $p"; done
+    [ -f quntra.heartbeat ] && echo "heartbeat: $(( $(date +%s) - $(cat quntra.heartbeat) ))s old (stale >300s)"
+    $PY scripts/paper_trading_status.py 2>/dev/null || true
+    ;;
+  logs) tail -f logs/quntra_paper.log ;;
+  *) echo "usage: quntra {start|stop|status|logs}"; exit 1 ;;
+esac

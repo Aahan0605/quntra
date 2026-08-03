@@ -26,6 +26,21 @@ NETWORK = _network_available()
 needs_network = pytest.mark.skipif(not NETWORK, reason="no market-data network access")
 
 
+def _clear_broker_caches():
+    # class-level cache — real credentials in config/secrets.env would
+    # otherwise leak a live client across unrelated tests
+    UnifiedDataFetcher._breeze = None
+    UnifiedDataFetcher._breeze_tried = False
+    UnifiedDataFetcher._breeze_symbol_map = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_broker_caches():
+    _clear_broker_caches()
+    yield
+    _clear_broker_caches()
+
+
 @pytest.fixture
 def fetcher():
     return UnifiedDataFetcher()
@@ -129,3 +144,82 @@ def test_live_quote(fetcher):
     df = fetcher.get_live_quote(["RELIANCE.NS"])
     assert len(df) == 1
     assert df.iloc[0]["last_price"] is not None
+
+
+# ----------------------------------------------------------------------- #
+# Breeze real-time quotes: symbol-map join + routing priority (all offline)
+
+def test_breeze_symbol_map_joins_on_last_column(fetcher, monkeypatch, tmp_path):
+    """The security master's last column is the plain NSE symbol — proven
+    by inspection (RELIANCE/TCS/INFY/HDFCBANK all matched their known
+    Breeze stock_code), not derivable by string transforms on the ticker."""
+    cache = tmp_path / "icici_nse_scripmaster.csv"
+    pd.DataFrame({"symbol": ["RELIANCE", "TCS"],
+                 "stock_code": ["RELIND", "TCS"]}).to_csv(cache, index=False)
+    monkeypatch.setattr("src.utils.data_fetcher._ROOT", tmp_path.parent)
+    (tmp_path.parent / "data" / "cache").mkdir(parents=True, exist_ok=True)
+    cache.rename(tmp_path.parent / "data" / "cache" / "icici_nse_scripmaster.csv")
+
+    UnifiedDataFetcher._breeze_symbol_map = None
+    mapping = fetcher._load_breeze_symbol_map()
+    assert mapping["RELIANCE"] == "RELIND"
+    assert mapping["TCS"] == "TCS"
+    UnifiedDataFetcher._breeze_symbol_map = None
+
+
+def test_breeze_quotes_use_the_symbol_map(fetcher, monkeypatch):
+    class FakeBreeze:
+        def get_quotes(self, stock_code, exchange_code, product_type):
+            assert stock_code == "RELIND"
+            return {"Success": [{"exchange_code": "NSE", "ltp": 1234.5,
+                                 "previous_close": 1200.0, "open": 1210.0,
+                                 "high": 1240.0, "low": 1205.0,
+                                 "ltp_percent_change": 2.87,
+                                 "ltt": "29-Jul-2026 10:00:00"}]}
+
+    monkeypatch.setattr(fetcher, "_get_breeze", lambda: FakeBreeze())
+    monkeypatch.setattr(fetcher, "_load_breeze_symbol_map",
+                       lambda: {"RELIANCE": "RELIND"})
+    out = fetcher._breeze_quotes(["RELIANCE.NS"])
+    assert out["RELIANCE.NS"]["last_price"] == 1234.5
+    assert out["RELIANCE.NS"]["source"] == "breeze_realtime"
+
+
+def test_breeze_quotes_skip_unmapped_tickers(fetcher, monkeypatch):
+    monkeypatch.setattr(fetcher, "_get_breeze", lambda: object())
+    monkeypatch.setattr(fetcher, "_load_breeze_symbol_map", lambda: {})
+    assert fetcher._breeze_quotes(["UNKNOWN.NS"]) == {}
+
+
+def test_breeze_quotes_empty_when_breeze_unavailable(fetcher, monkeypatch):
+    monkeypatch.setattr(fetcher, "_get_breeze", lambda: None)
+    assert fetcher._breeze_quotes(["RELIANCE.NS"]) == {}
+
+
+def test_live_quote_prefers_breeze_over_yfinance(fetcher, monkeypatch):
+    monkeypatch.setattr(fetcher, "_breeze_quotes",
+                       lambda tickers: {"RELIANCE.NS": {
+                           "ticker": "RELIANCE.NS", "last_price": 111.0,
+                           "close": 111.0, "open": None, "day_high": None,
+                           "day_low": None, "prev_close": None,
+                           "change_pct": None, "timestamp": None,
+                           "source": "breeze_realtime"}})
+    monkeypatch.setattr(fetcher, "_yf_quote",
+                       lambda t: pytest.fail(
+                           "yfinance should not be queried for a ticker "
+                           "Breeze already served"))
+    df = fetcher.get_live_quote(["RELIANCE.NS"])
+    assert df.iloc[0]["source"] == "breeze_realtime"
+
+
+def test_live_quote_falls_through_to_yfinance_when_breeze_has_nothing(
+        fetcher, monkeypatch):
+    monkeypatch.setattr(fetcher, "_breeze_quotes", lambda tickers: {})
+    monkeypatch.setattr(fetcher, "_yf_quote",
+                       lambda t: {"ticker": t, "last_price": 222.0,
+                                 "close": 222.0, "open": None,
+                                 "day_high": None, "day_low": None,
+                                 "prev_close": None, "change_pct": None,
+                                 "timestamp": None, "source": "yfinance_delayed"})
+    df = fetcher.get_live_quote(["RELIANCE.NS"])
+    assert df.iloc[0]["source"] == "yfinance_delayed"

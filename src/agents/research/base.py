@@ -118,6 +118,57 @@ def fetch_rss(url: str, limit: int = 30) -> list[dict]:
         return []
 
 
+def fetch_newsapi(query: str, api_key: str | None = None,
+                  page_size: int = 30, timeout: int = 10) -> list[dict]:
+    """NewsAPI.org /v2/everything, normalized to fetch_rss's item shape.
+
+    Returns [] when no key is configured or the call fails for any
+    reason — a missing/rate-limited key must degrade to RSS-only, never
+    crash the research pipeline (the same contract fetch_rss makes).
+    """
+    import os
+
+    import requests
+
+    key = api_key or os.environ.get("NEWSAPI_KEY")
+    if not key:
+        return []
+    try:
+        resp = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={"q": query, "language": "en", "sortBy": "publishedAt",
+                   "pageSize": page_size, "apiKey": key},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "ok":
+            logger.warning("NewsAPI returned status=%s: %s",
+                           data.get("status"), data.get("message"))
+            return []
+        out = []
+        for a in data.get("articles", []):
+            published_dt = None
+            if a.get("publishedAt"):
+                try:
+                    published_dt = datetime.strptime(
+                        a["publishedAt"], "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+            out.append({
+                "title": a.get("title") or "",
+                "summary": (a.get("description") or "")[:500],
+                "link": a.get("url") or "",
+                "published": a.get("publishedAt") or "",
+                "published_dt": published_dt,
+            })
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NewsAPI fetch failed for query=%r: %s", query, e)
+        return []
+
+
 def yf_pct_change(ticker: str, period: str = "5d") -> float | None:
     """Last close-over-close %change via yfinance. None on failure."""
     try:

@@ -27,6 +27,10 @@ def main() -> int:
     load_dotenv(ROOT / "config" / "secrets.env")
     load_dotenv(ROOT / ".env")
 
+    # After load_dotenv so the filter knows the live secret values.
+    from src.utils.log_redaction import install_redaction
+    install_redaction()
+
     from scripts.scheduler import build_hermes
     from src.alerts.telegram_bot import QuNtraTelegramBot
 

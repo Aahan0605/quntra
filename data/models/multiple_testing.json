@@ -1,0 +1,16 @@
+{
+  "models_dir": "data/models",
+  "n_trials": 24,
+  "n_skipped_old_schema": 4,
+  "skipped": [
+    "TATASTEEL.NS.meta.json",
+    "BAJFINANCE.NS.meta.json",
+    "ICICIBANK.NS.meta.json",
+    "SUNPHARMA.NS.meta.json"
+  ],
+  "fdr_q": 0.1,
+  "n_passed_naive_gate": 3,
+  "expected_false_positives_at_naive_gate": 1.2,
+  "n_survives_fdr": 0,
+  "survivors": []
+}

@@ -1,4 +1,4 @@
-"""Phone-run controls: /start_trading and /kite_token — offline, mocked."""
+"""Phone-run controls: /start_trading and /breeze_token — offline, mocked."""
 
 from unittest.mock import MagicMock
 
@@ -60,53 +60,42 @@ def test_start_trading_arms_and_builds_watchlist(bot, monkeypatch):
     assert watch  # non-empty
 
 
-def test_kite_token_usage_when_no_arg(bot, monkeypatch):
-    monkeypatch.setenv("KITE_API_KEY", "FAKE_KITE_KEY_REDACTED")
-    out = bot.dispatch("kite_token")
+def test_breeze_token_usage_when_no_arg(bot, monkeypatch):
+    monkeypatch.setenv("ICICI_BREEZE_API_KEY", "fake_test_api_key_123")
+    out = bot.dispatch("breeze_token")
     assert "Usage" in out
-    assert "request_token" in out
+    assert "session_token" in out
 
 
-def test_kite_token_direct_access_token(bot, monkeypatch):
+def test_breeze_token_sets_and_confirms(bot, monkeypatch):
     called = {}
 
     def fake_set(tok):
         called["tok"] = tok
-        return "NEWACCESSTOKEN123", "direct"
+        return tok
 
-    monkeypatch.setattr("src.integrations.kite_session.set_token", fake_set)
+    monkeypatch.setattr("src.integrations.breeze_session.set_token", fake_set)
     monkeypatch.setattr(
-        "src.integrations.kite_session.token_status", lambda: "valid")
-    out = bot.dispatch("kite_token", "someaccesstoken")
-    assert called["tok"] == "someaccesstoken"
+        "src.integrations.breeze_session.token_status", lambda: "valid")
+    out = bot.dispatch("breeze_token", "56500413")
+    assert called["tok"] == "56500413"
     assert "updated" in out.lower()
-    assert "ready access token" in out.lower()
-    assert "NEWACC" in out
+    assert "565004" in out
 
 
-def test_kite_token_exchanged_request_token(bot, monkeypatch):
-    monkeypatch.setattr("src.integrations.kite_session.set_token",
-                        lambda tok: ("EXCHANGED9", "exchanged"))
-    monkeypatch.setattr(
-        "src.integrations.kite_session.token_status", lambda: "valid")
-    out = bot.dispatch("kite_token", "reqtok123")
-    assert "exchanged" in out.lower()
-    assert "EXCHAN" in out
-
-
-def test_kite_token_failure(bot, monkeypatch):
+def test_breeze_token_failure(bot, monkeypatch):
     def boom(tok):
-        raise RuntimeError("Token is invalid or has expired")
+        raise RuntimeError("Authentication Fail :: Invalid Checksum.")
 
-    monkeypatch.setattr("src.integrations.kite_session.set_token", boom)
-    out = bot.dispatch("kite_token", "badtoken")
+    monkeypatch.setattr("src.integrations.breeze_session.set_token", boom)
+    out = bot.dispatch("breeze_token", "badtoken")
     assert "couldn't use that token" in out.lower()
-    assert "request_token" in out.lower()
+    assert "apisession" in out.lower()
 
 
 def test_dispatch_never_raises_new_commands(bot, monkeypatch):
     # both new commands must return a string, never throw
     monkeypatch.setattr("scripts.scheduler.is_trading_day", lambda *a: False)
-    for name in ("start_trading", "kite_token"):
+    for name in ("start_trading", "breeze_token"):
         r = bot.dispatch(name)
         assert isinstance(r, str) and r

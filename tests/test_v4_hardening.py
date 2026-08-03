@@ -1,7 +1,7 @@
 """Tests for the v4.0 hardening loop: auth bootstrap, notifications,
 watchdog, token rotation, status flags. All offline."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -219,6 +219,8 @@ def test_paper_trade_open_and_close_notify():
     assert "PAPER TRADE OPENED" in spy.sent[0]
     assert "10/12" in spy.sent[0] and "technical:3" in spy.sent[0]
     trader.fetcher.price = 105.0
+    # Past MIN_HOLD_MINUTES — take-profit is blocked inside that window.
+    trader._positions["h1"]["entry_time"] -= timedelta(minutes=20)
     trader.manage_positions()
     assert len(spy.sent) == 2
     assert "PAPER TRADE CLOSED" in spy.sent[1]

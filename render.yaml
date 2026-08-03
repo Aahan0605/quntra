@@ -1,0 +1,104 @@
+# Render Blueprint — declares the whole deployment: managed Postgres +
+# two always-on processes, both built from the same Dockerfile.
+#
+#   scheduler     Web Service     runs scripts/scheduler.py — the /health
+#                                 endpoint (scripts/scheduler.py's own
+#                                 stdlib HTTP server, active whenever PORT
+#                                 is set) lets Render's health check detect
+#                                 a HUNG process, not just a crashed one —
+#                                 the exact failure mode that went
+#                                 undetected for 5 days on the Mac.
+#   telegram-bot  Background Worker  runs scripts/run_telegram_bot.py — a
+#                                 long-poll loop with no HTTP surface, so
+#                                 no health check; Render still restarts it
+#                                 on a crash/exit.
+#
+# watchdog.py is intentionally not deployed as a third service — its jobs
+# are covered differently here: Render's restart-on-crash policy replaces
+# its process supervision, the /health check above replaces its heartbeat
+# check, and its Docker-container/battery/caffeinate logic is Mac-specific
+# and meaningless on a managed platform.
+#
+# Deploy: push this repo to GitHub, then in Render "New -> Blueprint",
+# point at the repo. Fill in the `sync: false` env vars in the dashboard
+# after the first deploy — they're intentionally not stored in this file.
+databases:
+  - name: quntra-db
+    plan: starter
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: quntra-scheduler
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      python scripts/scheduler.py --env config/secrets.env
+      --log-file logs/quntra_paper.log
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: quntra-db
+          property: connectionString
+      - key: PAPER_TRADE
+        value: "true"
+      - key: LIVE_TRADING
+        value: "false"
+      - key: DAILY_CAPITAL_INR
+        value: "25000"
+      - key: MAX_TRADES_PER_DAY
+        value: "3"
+      - key: MIN_SIGNAL_SCORE
+        value: "9"
+      - key: ENABLE_SIGNAL_COUNCIL_TRADING
+        value: "false"
+      # Everything below is a real secret — set manually in the dashboard,
+      # never committed. sync: false means Render will prompt for it.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ICICI_BREEZE_API_KEY
+        sync: false
+      - key: ICICI_BREEZE_API_SECRET
+        sync: false
+      - key: ICICI_BREEZE_SESSION_TOKEN
+        sync: false
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+  - type: worker
+    name: quntra-telegram-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python scripts/run_telegram_bot.py
+    plan: starter
+    envVars:
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: quntra-db
+          property: connectionString
+      - key: PAPER_TRADE
+        value: "true"
+      - key: LIVE_TRADING
+        value: "false"
+      - key: DAILY_CAPITAL_INR
+        value: "25000"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ICICI_BREEZE_API_KEY
+        sync: false
+      - key: ICICI_BREEZE_API_SECRET
+        sync: false
+      - key: ICICI_BREEZE_SESSION_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
