@@ -245,13 +245,17 @@ def dry_run() -> int:
 
 
 def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
-    """Minimal HTTP healthcheck for cloud platforms (Railway etc.).
+    """Minimal HTTP healthcheck for cloud platforms (Render, Railway, etc.).
 
-    Railway's restart policy only detects a process EXIT, not a hang —
+    A platform's restart policy only detects a process EXIT, not a hang —
     exactly the failure mode that went undetected for 5 days on the Mac
     (caught there by watchdog.py polling this same heartbeat file; there
     is no watchdog process in a cloud deploy). Only starts when PORT is
     set, so local Mac runs are completely unaffected.
+
+    On Render's free tier this endpoint does double duty: an external
+    uptime pinger hits it every 5 min to stop the service sleeping after
+    15 min idle, which would otherwise silently halt all trading jobs.
     """
     import os
     port = os.environ.get("PORT")
@@ -277,7 +281,7 @@ def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
 
     server = http.server.HTTPServer(("0.0.0.0", int(port)), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    logger.info("Healthcheck server listening on :%s (Railway restarts on "
+    logger.info("Healthcheck server listening on :%s (platform restarts on "
                "a stale/failed check)", port)
 
 

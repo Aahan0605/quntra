@@ -18,6 +18,10 @@ yfinance==1.5.1           # global indices ONLY — not for Indian equity
 pandas-market-calendars==5.4.0
 appdirs==1.4.4            # jugaad-data runtime dep
 click                     # jugaad-data runtime dep
+feedparser==6.0.12        # RSS news feeds (NewsAgent). Was missing here —
+                          # present on the dev Mac but absent from the
+                          # Render image, so all 5 feeds silently failed
+                          # with "No module named 'feedparser'".
 
 # Infrastructure
 SQLAlchemy==2.0.51
