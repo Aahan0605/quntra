@@ -883,7 +883,20 @@ class QuNtraTelegramBot:
                         await update.message.reply_text(reply[:4000])
                     return
                 if not self.is_authorized(chat_id):
-                    return  # silent — don't reveal the bot exists
+                    # Stay silent to the sender (an unknown chat must not
+                    # learn the bot exists), but ALWAYS log it. Dropping a
+                    # command with no trace made a real outage nearly
+                    # undiagnosable: after the Render migration the whitelist
+                    # lived in a fresh empty DB, so every operator command
+                    # vanished with zero evidence anywhere.
+                    logger.warning(
+                        "Ignoring /%s from unauthorized chat_id=%s — "
+                        "whitelist has %d user(s). Send /start to claim the "
+                        "bot if this is the operator on a new database.",
+                        name, chat_id,
+                        len((self.hermes.get_system_state(
+                            self.AUTHORIZED_USERS_KEY) or {}).get("users", [])))
+                    return
                 args = context.args or []
                 # dispatch() logs the call and absorbs all errors
                 reply = await asyncio.get_event_loop().run_in_executor(
