@@ -723,6 +723,14 @@ class HermesCoordinator:
     # jobs where running late is still useful, runs a same-day catch-up.
 
     _CATCHUP_JOBS = {
+        # Without these two a slept-through morning silently means NO
+        # trading day: pre_market builds the watchlist and sets the regime,
+        # arm_system enables the OMS. Everything downstream then no-ops with
+        # an empty watchlist and a disabled OMS, and nothing looks broken.
+        # Especially important on Render's free tier, where the service
+        # sleeps after 15 min idle and can miss the 06:00/08:45 window.
+        "pre_market": lambda h: h.run_pre_market_sequence(),
+        "arm_system": lambda h: h.arm_system(),
         "close_mgmt": lambda h: h.begin_close_management(),
         "post_market": lambda h: h.run_post_market_sequence(),
         "eod_report": lambda h: h.send_eod_report(),
@@ -732,7 +740,8 @@ class HermesCoordinator:
         # missed Monday rebalance must not silently wait a full week.
         "allocator_rebalance": lambda h: h.run_allocator_rebalance(),
     }
-    _MARKET_HOUR_CATCHUP = {"close_mgmt", "post_market", "eod_report",
+    _MARKET_HOUR_CATCHUP = {"pre_market", "arm_system", "close_mgmt",
+                            "post_market", "eod_report",
                             "allocator_rebalance"}
 
     def handle_missed_job(self, job_id: str, scheduled_at_iso: str) -> None:

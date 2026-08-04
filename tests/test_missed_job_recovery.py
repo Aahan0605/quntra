@@ -96,3 +96,16 @@ def test_no_telegram_configured_never_raises():
     h = HermesCoordinator(brain=QuNtraBrain(), trader=StubTrader(),
                           telegram=None, research_team={})
     h.handle_missed_job("market_loop", "2026-07-23T11:53:00+05:30")  # no crash
+
+
+def test_pre_market_and_arm_system_have_catchup(hermes, monkeypatch):
+    """A slept-through morning must not silently cancel the trading day.
+    Without catch-up for these two, pre_market never builds the watchlist
+    and arm_system never enables the OMS — everything downstream then
+    no-ops against an empty watchlist and nothing looks broken.
+    """
+    from src.governor.hermes import HermesCoordinator
+    for job in ("pre_market", "arm_system"):
+        assert job in HermesCoordinator._CATCHUP_JOBS, f"{job} has no catch-up"
+        # market-hour gated: a catch-up must not fire on a holiday/weekend
+        assert job in HermesCoordinator._MARKET_HOUR_CATCHUP
