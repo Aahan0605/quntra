@@ -162,7 +162,11 @@ class UnifiedDataFetcher:
             load_dotenv(_ROOT / "config" / "secrets.env")
             key = os.getenv("ICICI_BREEZE_API_KEY")
             secret = os.getenv("ICICI_BREEZE_API_SECRET")
-            token = os.getenv("ICICI_BREEZE_SESSION_TOKEN")
+            # DB first, env second — a token refreshed via /breeze_token
+            # lands in system_state, while the env var only ever holds the
+            # deploy-time value, which is stale by the next morning.
+            from src.integrations.breeze_session import stored_token
+            token = stored_token()
             if not (key and secret and token):
                 return None
             # breeze_connect downloads its security-master zip at import
