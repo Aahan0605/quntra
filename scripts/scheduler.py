@@ -281,6 +281,48 @@ def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
                "a stale/failed check)", port)
 
 
+def build_scheduler(hermes: HermesCoordinator) -> BlockingScheduler:
+    """Fully wired scheduler — jobs, missed/executed listeners, the /health
+    server — everything except actually calling .start(). Shared by
+    main() (which starts it in the main thread) and
+    scripts/run_combined.py (which starts it in a background thread so
+    the Telegram bot's polling loop can own the main thread instead —
+    built for Render's free tier, which has no free Background Worker
+    service, so both processes have to share one).
+    """
+    scheduler = BlockingScheduler(timezone=IST)
+    register_jobs(scheduler, hermes)
+
+    # /health reads system_state["last_job_run"] to prove the scheduler
+    # is not just alive but actually firing jobs.
+    from apscheduler.events import (EVENT_JOB_ERROR, EVENT_JOB_EXECUTED,
+                                    EVENT_JOB_MISSED)
+
+    def _record_job(event):
+        try:
+            hermes.set_system_state("last_job_run", {
+                "name": event.job_id,
+                "at": datetime.now(IST).isoformat(),
+                "error": str(event.exception) if getattr(
+                    event, "exception", None) else None,
+            })
+        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
+            logger.exception("could not record last_job_run")
+
+    def _record_missed(event):
+        try:
+            hermes.handle_missed_job(
+                event.job_id, event.scheduled_run_time.isoformat())
+        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
+            logger.exception("could not handle missed job %s", event.job_id)
+
+    scheduler.add_listener(_record_job, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+    scheduler.add_listener(_record_missed, EVENT_JOB_MISSED)
+    logger.info("QuNtra scheduler wired — %d jobs, timezone IST",
+                len(scheduler.get_jobs()))
+    return scheduler
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -311,36 +353,7 @@ def main() -> int:
         return dry_run()
 
     hermes = build_hermes()
-    scheduler = BlockingScheduler(timezone=IST)
-    register_jobs(scheduler, hermes)
-
-    # /health reads system_state["last_job_run"] to prove the scheduler
-    # is not just alive but actually firing jobs.
-    from apscheduler.events import (EVENT_JOB_ERROR, EVENT_JOB_EXECUTED,
-                                    EVENT_JOB_MISSED)
-
-    def _record_job(event):
-        try:
-            hermes.set_system_state("last_job_run", {
-                "name": event.job_id,
-                "at": datetime.now(IST).isoformat(),
-                "error": str(event.exception) if getattr(
-                    event, "exception", None) else None,
-            })
-        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
-            logger.exception("could not record last_job_run")
-
-    def _record_missed(event):
-        try:
-            hermes.handle_missed_job(
-                event.job_id, event.scheduled_run_time.isoformat())
-        except Exception:  # noqa: BLE001 — bookkeeping never kills a job
-            logger.exception("could not handle missed job %s", event.job_id)
-
-    scheduler.add_listener(_record_job, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
-    scheduler.add_listener(_record_missed, EVENT_JOB_MISSED)
-    logger.info("QuNtra scheduler starting — %d jobs, timezone IST",
-                len(scheduler.get_jobs()))
+    scheduler = build_scheduler(hermes)
     _start_healthcheck_server()
     try:
         scheduler.start()
