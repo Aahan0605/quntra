@@ -250,9 +250,8 @@ class HermesCoordinator:
             can_trade = False
             if signals:
                 actions["skipped"].append(
-                    "signal-council trading disabled (backtested negative "
-                    "— docs/CEO_REVIEW.md); set "
-                    "ENABLE_SIGNAL_COUNCIL_TRADING=true to override")
+                    "signal-council disabled (backtested negative; see "
+                    "docs/CEO_REVIEW.md)")
         if can_trade:
             regime = (self.get_system_state("regime") or {}).get("state")
             # Scale size by the crash-risk band. Below CRISIS the gate does
@@ -271,10 +270,16 @@ class HermesCoordinator:
                 )
                 actions["executed"].append(trade)
         else:
+            # rejection_reason is String(100). An over-long value raises
+            # StringDataRightTruncation, which killed the whole market tick
+            # on 2026-08-05 (the ENABLE_SIGNAL_COUNCIL_TRADING notice is 126
+            # chars). Truncate here so no future wording can stop trading —
+            # the audit trail is worth less than the session staying alive.
+            reason = "; ".join(actions["skipped"])[:100]
             for sig in signals:
                 self.brain.remember_signal({
                     **sig, "executed": False,
-                    "rejection_reason": "; ".join(actions["skipped"]),
+                    "rejection_reason": reason,
                 })
 
         # 5. Manage open positions (trailing stops) — delegated to trader

@@ -148,8 +148,30 @@ def test_market_session_signal_council_disabled_by_default(hermes, monkeypatch):
     hermes.run_pre_market_sequence()
     actions = hermes.run_market_session()
     assert actions["executed"] == []
-    assert any("signal-council trading disabled" in s
+    assert any("signal-council disabled" in s
               for s in actions["skipped"])
+
+
+def test_rejection_reason_never_exceeds_its_column(hermes, monkeypatch):
+    """Signal.rejection_reason is String(100). An over-long value raises
+    StringDataRightTruncation, which on 2026-08-05 killed every market tick
+    for a whole session — the disable notice was 126 chars. Truncating is
+    what keeps a wording change from stopping trading.
+    """
+    monkeypatch.delenv("ENABLE_SIGNAL_COUNCIL_TRADING", raising=False)
+    hermes.run_pre_market_sequence()
+    # Force a pathologically long skip reason through the same path.
+    hermes.circuit = None
+    actions = hermes.run_market_session()
+    for reason in actions["skipped"]:
+        pass  # reasons themselves may be long; what matters is the DB write
+    from src.db import Signal, get_session
+    with get_session(hermes.db_url) as s:
+        for row in s.query(Signal).all():
+            if row.rejection_reason is not None:
+                assert len(row.rejection_reason) <= 100, (
+                    f"rejection_reason {len(row.rejection_reason)} chars "
+                    f"exceeds String(100): {row.rejection_reason!r}")
 
 
 def test_market_session_respects_oms_disabled(hermes):

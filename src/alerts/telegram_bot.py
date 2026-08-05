@@ -921,6 +921,22 @@ class QuNtraTelegramBot:
             app.add_handler(CommandHandler(name, make_handler(name)))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                        on_message))
+
+        async def on_error(update, context):
+            """Without a registered handler, python-telegram-bot logs
+            'No error handlers are registered' and the polling loop can
+            stop for good while the process stays alive — heartbeats keep
+            firing, so nothing looks broken. That is exactly what happened
+            on 2026-08-05 01:11 UTC: a transient
+            telegram.error.NetworkError 'Bad Gateway' killed polling at
+            06:41 IST, so every operator command (including the daily
+            /breeze_token) was silently ignored for the rest of the day.
+            Swallowing the error here keeps the loop retrying.
+            """
+            logger.error("Telegram update failed (polling continues): %s",
+                         context.error)
+
+        app.add_error_handler(on_error)
         logger.info("Telegram bot polling started (%d commands)",
                     len(self.COMMANDS))
         app.run_polling()
