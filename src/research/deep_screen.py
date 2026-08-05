@@ -7,14 +7,26 @@ long to hold — using the SAME numbers PaperTrader actually enforces
 (-2% stop / +4% target / 5-day time stop), because a plan quoting
 different levels than the engine would be fiction.
 
-WHAT THIS IS NOT
-----------------
-This does not place trades and is deliberately not wired into the live
-allocator. scripts/backtest_signal_council.py measured per-stock selection
-on this exact universe at -0.51% over 5 years vs +52.55% for buy-and-hold
-NIFTY, and src/ml/multiple_testing.py found 0 of 194 per-ticker models
-survive a Benjamini-Hochberg correction. So this is decision support the
-operator reads — not an unvalidated strategy quietly given capital.
+WHAT THIS IS NOT — AND THE NUMBERS SAYING SO
+--------------------------------------------
+This does not place trades and must not be wired into the allocator.
+scripts/backtest_deep_screen.py replayed THIS scoring function
+point-in-time over 2021-2026 (185 names, real exits, real ICICI costs):
+
+    deep screen         -12.78%   CAGR -3.40%   Sharpe -0.391
+    buy-and-hold NIFTY  +47.91%   CAGR 10.42%   Sharpe  0.839
+    equal-weight panel +210.65%   CAGR 33.25%   Sharpe  1.699
+
+It loses money outright, and loses to simply owning the whole panel by
+more than 200 points. The cause is not costs: the picks' mean 5-day
+forward return is -0.14% BELOW the panel average before any cost or stop
+is applied, i.e. the score selects worse-than-average stocks — the same
+short-term-reversal pattern that sank the signal-council. Costs then
+amplify a losing selection (357 trades/yr, ~38% of capital in fees).
+
+So: a ranked watchlist to read, never an execution signal. If it is ever
+wired to capital, re-run scripts/backtest_deep_screen.py first and expect
+to have to fix the negative raw edge, not the turnover.
 
 The 50 are picked by liquidity + sector spread, then scored on measurable
 factors only (trend, momentum, volatility, drawdown, valuation). Every
@@ -90,6 +102,50 @@ def score_ticker(close: pd.Series) -> dict | None:
     }
 
 
+def fundamentals_for(tickers: list[str]) -> dict[str, dict]:
+    """P/E, P/B, D/E and market cap per ticker, best-effort.
+
+    Measured coverage on a random 20-name Nifty-200 sample (2026-08-05):
+    trailingPE 100%, priceToBook 100%, debtToEquity 95%, marketCap 100%,
+    but returnOnEquity only 40%. ROE is therefore reported when present
+    and never scored — scoring a factor that exists for 40% of names would
+    silently rank two different universes against each other.
+    """
+    import yfinance as yf
+
+    out: dict[str, dict] = {}
+    for t in tickers:
+        try:
+            i = yf.Ticker(t).info or {}
+        except Exception as e:  # noqa: BLE001 — a name without data is
+            logger.debug("fundamentals unavailable for %s: %s", t, e)
+            continue
+        dte = i.get("debtToEquity")
+        out[t] = {
+            "pe": i.get("trailingPE"),
+            "pb": i.get("priceToBook"),
+            "debt_to_equity": (dte / 100 if dte is not None else None),
+            "market_cap": i.get("marketCap"),
+            # Reported for context only — see docstring, 40% coverage.
+            "roe": i.get("returnOnEquity"),
+        }
+    return out
+
+
+def valuation_flags(f: dict) -> list[str]:
+    """Plain-language cautions from well-covered fields only. Absent data
+    yields no flag rather than a false all-clear."""
+    flags = []
+    pe, pb, dte = f.get("pe"), f.get("pb"), f.get("debt_to_equity")
+    if pe is not None and pe > 60:
+        flags.append(f"rich P/E {pe:.0f}")
+    if pb is not None and pb > 10:
+        flags.append(f"rich P/B {pb:.1f}")
+    if dte is not None and dte > 2:
+        flags.append(f"high D/E {dte:.1f}")
+    return flags
+
+
 def plan_for(px: float) -> dict:
     """Entry/stop/target/hold using the engine's real thresholds."""
     return {
@@ -148,6 +204,20 @@ def run_screen(top_n: int = TOP_N) -> dict:
         if len(picked) >= top_n:
             break
 
+    # Fundamentals for the shortlist only (one yfinance call per name;
+    # doing all 194 would be slow and pointless). Context, never score.
+    try:
+        funda = fundamentals_for([r["ticker"] for r in picked])
+        for r in picked:
+            f = funda.get(r["ticker"], {})
+            r["fundamentals"] = f
+            r["valuation_flags"] = valuation_flags(f) if f else []
+    except Exception as e:  # noqa: BLE001 — never let this break the screen
+        logger.warning("fundamentals lookup failed: %s", e)
+        for r in picked:
+            r.setdefault("fundamentals", {})
+            r.setdefault("valuation_flags", [])
+
     n_stale = sum(1 for r in picked if r["stale"])
     if n_stale:
         logger.warning("deep screen: %d/%d picks priced off cache older than "
@@ -184,9 +254,26 @@ def format_report(res: dict, limit: int = 15) -> str:
             f"target ₹{p['target']} · ≤{p['max_hold_days']}d\n"
             f"  20d {r['ret_20d_pct']:+.1f}% · 60d {r['ret_60d_pct']:+.1f}% · "
             f"vol {r['vol_20d_pct']:.0f}% · dd {r['drawdown_pct']:+.1f}%")
+        f = r.get("fundamentals") or {}
+        bits = []
+        if f.get("pe") is not None:
+            bits.append(f"P/E {f['pe']:.0f}")
+        if f.get("pb") is not None:
+            bits.append(f"P/B {f['pb']:.1f}")
+        if f.get("debt_to_equity") is not None:
+            bits.append(f"D/E {f['debt_to_equity']:.1f}")
+        if f.get("roe") is not None:
+            bits.append(f"ROE {100 * f['roe']:.0f}%")
+        if bits:
+            lines[-1] += "\n  " + " · ".join(bits)
+        if r.get("valuation_flags"):
+            lines[-1] += "\n  ⚠️ " + ", ".join(r["valuation_flags"])
     if res["n_picked"] > limit:
         lines.append(f"\n…{res['n_picked'] - limit} more in /deep_screen")
-    lines.append("\n⚠️ Decision support only — not auto-traded. Per-stock "
-                 "selection backtested worse than buy-and-hold on this "
-                 "universe (docs/CEO_REVIEW.md).")
+    lines.append(
+        "\n🚨 WATCHLIST ONLY — do not trade this list mechanically.\n"
+        "Backtested point-in-time 2021-2026: screen -12.78% vs "
+        "buy-and-hold NIFTY +47.91% vs equal-weight panel +210.65%. "
+        "The picks average -0.14% BELOW the panel over the next 5 days "
+        "before costs. Use as a reading list, not a buy list.")
     return "\n".join(lines)
