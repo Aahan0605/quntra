@@ -204,6 +204,7 @@ Your AI quantitative research organization
 /gate_report — Full day-by-day trading history (auto-sent at day 40)
 /obsidian — Regenerate the Obsidian knowledge vault from the database
 /start_trading — Start today's paper session from your phone (no laptop)
+/rebalance — Run the passive allocator NOW (cron is Monday-only)
 /breeze_token — Refresh the daily ICICI Breeze session: /breeze_token <token>
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -535,6 +536,38 @@ class QuNtraTelegramBot:
             for k, v in checks.items()
         ] + [f"🕐 Last job: {job_desc}",
              "📄 Mode: PAPER TRADING (live capital: ₹0)"]
+        return "\n".join(lines)
+
+    def cmd_rebalance(self) -> str:
+        """Run the passive allocator now instead of waiting for Monday.
+
+        Exists because the scheduled allocator_rebalance is Monday-only, so
+        a service that comes up mid-week (or misses the slot, as happened
+        when this deploy was created after Monday 09:20 IST) holds NO
+        positions until the following Monday — with nothing in the logs
+        saying so. This is the same run_allocator_rebalance() the cron job
+        calls; the Rebalancer's own weekly/3%-drift/20%-turnover gates still
+        decide whether anything actually trades.
+        """
+        res = self.hermes.run_allocator_rebalance()
+        if res.get("skipped"):
+            return f"⚠️ Rebalance skipped: {res['skipped']}"
+        if not res.get("rebalanced"):
+            reason = res.get("reason", "within drift thresholds")
+            return (f"✅ No trades needed — {reason}. "
+                    "Existing weights are already on target.")
+        trades = res.get("trades", [])
+        crash = res.get("crash_risk") or {}
+        lines = [f"⚖️ REBALANCED — {len(trades)} order(s), "
+                 f"turnover {res.get('turnover', 0):.1%}"]
+        if crash:
+            lines.append(f"regime {crash.get('regime')} · exposure "
+                         f"{crash.get('exposure_multiplier')}")
+        for t in trades[:15]:
+            lines.append(f"  {t['ticker']}: → {t['target_qty']} "
+                         f"({t['result']})")
+        if len(trades) > 15:
+            lines.append(f"  …{len(trades) - 15} more")
         return "\n".join(lines)
 
     def cmd_deep_screen(self, *args) -> str:
@@ -873,6 +906,8 @@ class QuNtraTelegramBot:
         "start_trading", "breeze_token",
         # nightly 50-stock Nifty-200 screen -> tomorrow's plan
         "deep_screen",
+        # manual allocator run — the cron job is Monday-only
+        "rebalance",
     ]
 
     def run_polling(self):
