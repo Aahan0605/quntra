@@ -218,6 +218,7 @@ Your AI quantitative research organization
 🔬 RESEARCH & INTELLIGENCE
 ━━━━━━━━━━━━━━━━━━━━
 /research — Latest pre-market research summary
+/deep_screen — Tonight's 50-stock shortlist (entry/stop/target/hold); `/deep_screen now` recomputes
 /regime — Current market regime + recent history
 /watchlist — Today's watchlist (tickers scoring ≥9/12)
 /macro — Current macro environment summary
@@ -535,6 +536,21 @@ class QuNtraTelegramBot:
         ] + [f"🕐 Last job: {job_desc}",
              "📄 Mode: PAPER TRADING (live capital: ₹0)"]
         return "\n".join(lines)
+
+    def cmd_deep_screen(self, *args) -> str:
+        """Tonight's 50-stock shortlist with entry/stop/target/hold.
+        Reads the stored 20:00 IST run; `/deep_screen now` recomputes."""
+        from src.research.deep_screen import format_report, run_screen
+        if args and args[0].lower() == "now":
+            res = run_screen()
+            self.hermes.set_system_state("deep_screen", res)
+        else:
+            res = self.hermes.get_system_state("deep_screen")
+            if not res:
+                return ("No screen stored yet — it runs at 20:00 IST after "
+                        "the day's trading. Send /deep_screen now to build "
+                        "one immediately.")
+        return format_report(res, limit=12)[:3800]
 
     def cmd_research(self) -> str:
         from src.reporting import metrics as M
@@ -855,6 +871,8 @@ class QuNtraTelegramBot:
         "obsidian",
         # phone-run controls: start the session, refresh the Breeze session
         "start_trading", "breeze_token",
+        # nightly 50-stock Nifty-200 screen -> tomorrow's plan
+        "deep_screen",
     ]
 
     def run_polling(self):

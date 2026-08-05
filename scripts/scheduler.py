@@ -168,6 +168,9 @@ def register_jobs(scheduler: BlockingScheduler, hermes: HermesCoordinator):
         ("close_mgmt", hermes.begin_close_management, dict(hour=14, minute=30)),
         ("post_market", hermes.run_post_market_sequence, dict(hour=15, minute=30)),
         ("eod_report", hermes.send_eod_report, dict(hour=17, minute=0)),
+        # 20:00 — after post_market (15:30) and eod_report (17:00), so the
+        # screen sees the day's realised results before planning tomorrow.
+        ("deep_screen", hermes.run_deep_screen, dict(hour=20, minute=0)),
         ("overnight_research", hermes.start_overnight_research,
          dict(hour=18, minute=0)),
         ("overnight_batch", hermes.run_overnight_batch, dict(hour=22, minute=0)),
@@ -222,7 +225,7 @@ def dry_run() -> int:
     scheduler = BlockingScheduler(timezone=IST)
     hermes = _Stub()
     ids = register_jobs(scheduler, hermes)
-    assert len(ids) == 19, f"expected 19 jobs, got {len(ids)}"
+    assert len(ids) == 20, f"expected 20 jobs, got {len(ids)}"
     for job in scheduler.get_jobs():
         nxt = job.trigger.get_next_fire_time(None, datetime.now(IST))
         assert nxt is not None, f"job {job.id} would never fire"

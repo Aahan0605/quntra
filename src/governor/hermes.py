@@ -438,6 +438,25 @@ class HermesCoordinator:
         from src.alerts.telegram_bot import format_trade_details
         self.telegram.send(format_trade_details(self.brain.get_todays_trades()))
 
+    def run_deep_screen(self) -> dict:
+        """20:00 IST — after the day's trades and post-market analysis are
+        settled, screen the Nifty 200 and build tomorrow's shortlist with
+        per-stock entry/stop/target/hold. Decision support for the operator;
+        deliberately NOT wired into the allocator (see the module docstring
+        in src/research/deep_screen.py for why)."""
+        from src.research.deep_screen import format_report, run_screen
+
+        actions: dict = {"steps": []}
+        res = self._safe(run_screen, "deep_screen", actions)
+        if res is None:
+            return {"skipped": "screen failed", "steps": actions["steps"]}
+        self.set_system_state("deep_screen", res)
+        if self.telegram is not None:
+            self._safe(lambda: self.telegram.send(format_report(res)),
+                       "deep_screen_telegram", actions)
+        res["steps"] = actions["steps"]
+        return res
+
     def run_overnight_batch(self) -> dict:
         """22:00–06:00 IST: learn from trades, research, optimize, refit."""
         now = datetime.now(IST)
@@ -744,6 +763,8 @@ class HermesCoordinator:
         # The live strategy since 2026-07-28 (docs/CEO_REVIEW.md) — a
         # missed Monday rebalance must not silently wait a full week.
         "allocator_rebalance": lambda h: h.run_allocator_rebalance(),
+        # A missed screen means no shortlist for tomorrow morning.
+        "deep_screen": lambda h: h.run_deep_screen(),
     }
     _MARKET_HOUR_CATCHUP = {"pre_market", "arm_system", "close_mgmt",
                             "post_market", "eod_report",
