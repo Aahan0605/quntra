@@ -328,17 +328,35 @@ class SignalCouncil:
     def _log_scores(self, scores: dict, details: dict) -> None:
         """Every scoring run is auditable in the signals table."""
         try:
+            from sqlalchemy import select
+
             from src.db import Signal, get_session
             now = datetime.now(timezone.utc)
             top = sorted(scores.items(), key=lambda x: -x[1])[:5]
             with get_session(self.db_url) as s:
                 for ticker, score in top:
+                    # signal_hash is unique and date-keyed, so a second
+                    # pre-market run in the same day (cron at 06:00 plus a
+                    # manual /start_trading, which happened 2026-08-06)
+                    # raised UniqueViolation and lost the WHOLE batch's
+                    # audit trail, not just the duplicate row. Today's
+                    # scores are a snapshot, so re-running should refresh
+                    # them rather than fail.
+                    h = f"score-{ticker}-{now.date()}"
+                    row = s.execute(
+                        select(Signal).where(Signal.signal_hash == h)
+                    ).scalar_one_or_none()
+                    if row is not None:
+                        row.score = score
+                        row.agent_votes = details.get(ticker)
+                        row.signal_time = now
+                        continue
                     s.add(Signal(
                         ticker=ticker, score=score, direction="LONG",
                         agent_votes=details.get(ticker),
                         reasoning="council premarket scoring",
                         executed=False, signal_time=now,
-                        signal_hash=f"score-{ticker}-{now.date()}",
+                        signal_hash=h,
                     ))
         except Exception as e:  # noqa: BLE001
             logger.warning("could not log council scores: %s", e)
