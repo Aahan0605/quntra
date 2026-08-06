@@ -71,7 +71,10 @@ python3 scripts/scheduler.py --dry-run   # sanity check: 11 jobs, IST, holidays
 nohup python3 scripts/scheduler.py > logs/scheduler.log 2>&1 &
 ```
 
-`.env` ships with `PAPER_TRADE=true`, ₹25,000 simulated capital, max 4
+`.env` ships with `PAPER_TRADE=true`, ₹1,00,00,000 simulated capital (large
+enough that position sizing, not cash, is the binding constraint during the
+40-day paper gate — set `DAILY_CAPITAL_INR` back to your real account size
+before going live), max 4
 trades/day, min signal score 9. The scheduler skips NSE holidays
 automatically and survives reboots if you add it to launchd/systemd.
 

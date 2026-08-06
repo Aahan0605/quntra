@@ -59,3 +59,36 @@ def test_serves_503_when_heartbeat_file_missing(monkeypatch, tmp_path):
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/health")
     assert exc_info.value.code == 503
+
+
+# --- /status ---------------------------------------------------------------
+# The Render deploy had no way to report a single trade: its Postgres is
+# only reachable via the platform-injected connection string.
+
+def test_status_404s_without_a_token(monkeypatch, tmp_path):
+    port = "18085"
+    monkeypatch.setenv("PORT", port)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-bot-token")
+    monkeypatch.setattr(sch, "HEARTBEAT_FILE", tmp_path / "hb")
+    sch.HEARTBEAT_FILE.write_text(str(int(time.time())))
+    sch._start_healthcheck_server()
+    time.sleep(0.3)
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/status")
+    assert e.value.code == 404
+
+
+def test_status_token_matches_hash_of_bot_token(monkeypatch):
+    import hashlib
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-bot-token")
+    good = hashlib.sha256(b"secret-bot-token").hexdigest()
+    assert sch._status_token_ok(good)
+    assert not sch._status_token_ok("wrong")
+    assert not sch._status_token_ok("")
+
+
+def test_status_endpoint_closed_when_no_bot_token(monkeypatch):
+    """Fail closed: an unconfigured secret must not mean an open endpoint."""
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    import hashlib
+    assert not sch._status_token_ok(hashlib.sha256(b"").hexdigest())

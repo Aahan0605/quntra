@@ -20,12 +20,15 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv  # noqa: E402
 from sqlalchemy import select  # noqa: E402
+
+load_dotenv(ROOT / ".env")
 from src.db import Trade, get_session, init_db  # noqa: E402
 from src.governor.brain import QuNtraBrain  # noqa: E402
 
 GATE_DAYS = 40
-CAPITAL = 25_000.0
+CAPITAL = float(os.environ.get("DAILY_CAPITAL_INR", "25000"))
 AGENTS = ["valuation", "technical", "sentiment", "risk", "macro", "quantum"]
 
 

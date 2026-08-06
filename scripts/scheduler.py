@@ -111,16 +111,19 @@ def build_hermes() -> HermesCoordinator:
     import os
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
+    capital = float(os.environ.get("DAILY_CAPITAL_INR", "25000"))
     paper = os.environ.get("PAPER_TRADE", "true").lower() != "false"
     if paper:
         from src.execution.paper_trader import PaperTrader
-        trader = PaperTrader(brain=brain, fetcher=fetcher, telegram=telegram)
+        # cash used to be hardcoded at ₹25k, so raising DAILY_CAPITAL_INR
+        # sized the orders up but left the book unable to pay for them.
+        trader = PaperTrader(brain=brain, fetcher=fetcher, telegram=telegram,
+                             starting_cash=capital)
     else:
         from src.execution.kite_oms import KiteOMS
         trader = KiteOMS(brain=brain)
 
     from src.governor.council import SignalCouncil
-    capital = float(os.environ.get("DAILY_CAPITAL_INR", "25000"))
     council = SignalCouncil(capital=capital)
 
     from src.portfolio.live_allocator import PassiveAllocator
@@ -247,6 +250,18 @@ def dry_run() -> int:
     return 0
 
 
+def _status_token_ok(supplied: str) -> bool:
+    """Constant-time check of /status's token against the bot token's hash."""
+    import hashlib
+    import hmac
+    import os
+    secret = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not secret or not supplied:
+        return False
+    expected = hashlib.sha256(secret.encode()).hexdigest()
+    return hmac.compare_digest(expected, supplied)
+
+
 def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
     """Minimal HTTP healthcheck for cloud platforms (Render, Railway, etc.).
 
@@ -259,16 +274,25 @@ def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
     On Render's free tier this endpoint does double duty: an external
     uptime pinger hits it every 5 min to stop the service sleeping after
     15 min idle, which would otherwise silently halt all trading jobs.
+
+    /status?token=... additionally returns the gate dashboard as JSON.
+    The deployed service was previously a black box: its Postgres is only
+    reachable with the platform-injected connection string, so there was
+    no way to see a single trade without opening the dashboard.
     """
     import os
     port = os.environ.get("PORT")
     if not port:
         return
     import http.server
+    import json
     import threading
+    from urllib.parse import parse_qs, urlparse
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's naming
+            if urlparse(self.path).path == "/status":
+                return self._status(parse_qs(urlparse(self.path).query))
             try:
                 age = int(time.time()) - int(HEARTBEAT_FILE.read_text().strip())
             except (FileNotFoundError, ValueError):
@@ -278,6 +302,31 @@ def _start_healthcheck_server(max_stale_seconds: int = 300) -> None:
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(f"heartbeat_age={age}".encode())
+
+        def _status(self, query: dict) -> None:
+            """Gate dashboard as JSON. Public URL — so it is token-gated.
+
+            The token is sha256(TELEGRAM_BOT_TOKEN): a secret this service
+            already has, so nothing new goes in the dashboard, and the bot
+            token itself never travels over the wire. No token configured
+            means no endpoint, rather than an open one.
+            """
+            if not _status_token_ok(query.get("token", [""])[0]):
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                from scripts.paper_trading_status import gather_stats
+                body = json.dumps(gather_stats() or {"days": 0},
+                                  default=str).encode()
+                code = 200
+            except Exception as e:  # noqa: BLE001 — never 500 the pinger's host
+                body = json.dumps({"error": str(e)}).encode()
+                code = 503
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *a):  # noqa: A002 — silence per-request noise
             pass

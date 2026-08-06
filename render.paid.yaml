@@ -54,7 +54,7 @@ services:
       - key: LIVE_TRADING
         value: "false"
       - key: DAILY_CAPITAL_INR
-        value: "25000"
+        value: "10000000"
       - key: MAX_TRADES_PER_DAY
         value: "3"
       - key: MIN_SIGNAL_SCORE
@@ -94,7 +94,7 @@ services:
       - key: LIVE_TRADING
         value: "false"
       - key: DAILY_CAPITAL_INR
-        value: "25000"
+        value: "10000000"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
