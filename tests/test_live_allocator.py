@@ -230,7 +230,7 @@ def test_allocator_rebalance_opens_new_positions(monkeypatch):
     assert len(trader.get_positions()) > 0
 
 
-def test_allocator_exposure_zero_liquidates_book(monkeypatch):
+def test_allocator_exposure_zero_liquidates_book(monkeypatch, tmp_path):
     """CRISIS (exposure=0.0) must empty the book, not just block new buys —
     a passive book has no per-position stop protecting it otherwise."""
     import src.portfolio.live_allocator as mod
@@ -242,11 +242,55 @@ def test_allocator_exposure_zero_liquidates_book(monkeypatch):
         "B.NS": 200 + pd.Series(range(300), index=idx) * 0.05,
     }, index=idx)
     trader = PaperTrader(FakeBrain(), fetcher=FakeFetcher())
-    allocator = PassiveAllocator(universe=["A.NS", "B.NS"], trader=trader,
-                                 capital=10_000.0)
+    # Own DB: db_url=None falls back to the real data/quntra.db, so the
+    # persisted rebalance date would leak into the developer's local state.
+    allocator = _alloc_with_db(tmp_path, monkeypatch, trader)
+    allocator.universe = ["A.NS", "B.NS"]
+    allocator.capital = 10_000.0
     allocator.rebalance(panel, exposure_multiplier=1.0)
     assert len(trader.get_positions()) > 0
 
-    allocator.rebalancer._last_rebalance = None  # force next call to re-trigger
+    # No _last_rebalance reset here on purpose: a CRISIS de-risk must
+    # bypass the weekly cadence by itself. Otherwise a crash the day after
+    # a rebalance would leave the book exposed until the next Monday.
     allocator.rebalance(panel, exposure_multiplier=0.0)
     assert trader.get_positions() == []
+
+
+# ---------------------------------------------------------------- #
+# Weekly cadence must survive process restarts.
+
+def _alloc_with_db(tmp_path, monkeypatch, trader):
+    import src.db.session as ds
+    from src.db import init_db
+    url = f"sqlite:///{tmp_path}/alloc.db"
+    monkeypatch.setattr(ds, "_engine", None)
+    monkeypatch.setattr(ds, "_SessionLocal", None)
+    init_db(url)
+    return PassiveAllocator(universe=["A.NS", "B.NS"], trader=trader,
+                            capital=10_000.0, db_url=url)
+
+
+def test_is_due_true_when_never_rebalanced(tmp_path, monkeypatch):
+    a = _alloc_with_db(tmp_path, monkeypatch, PaperTrader(FakeBrain(),
+                                                          fetcher=FakeFetcher(100.0)))
+    assert a.is_due() is True
+
+
+def test_weekly_cadence_survives_restart(tmp_path, monkeypatch):
+    """Rebalancer._last_rebalance is in-memory, so a restart used to reset
+    the weekly gate and rebalance again immediately — silent extra turnover
+    on a platform that redeploys often."""
+    import datetime as dt
+    trader = PaperTrader(FakeBrain(), fetcher=FakeFetcher(100.0))
+    a = _alloc_with_db(tmp_path, monkeypatch, trader)
+    today = dt.datetime.now(dt.timezone.utc).date()
+    a._save_last_rebalance(today)
+
+    assert a.is_due(today) is False
+    # A brand-new object == a restarted process; must still be gated.
+    b = PassiveAllocator(universe=["A.NS"], trader=trader,
+                         capital=10_000.0, db_url=a.db_url)
+    assert b.is_due(today) is False
+    # ...but a new ISO week is genuinely due again.
+    assert b.is_due(today + dt.timedelta(days=8)) is True

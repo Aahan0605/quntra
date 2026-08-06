@@ -58,6 +58,32 @@ def main() -> int:
 
     threading.Thread(target=_run_scheduler, daemon=True, name="scheduler").start()
 
+    def _catchup_allocator():
+        """Run the weekly rebalance at startup if one is owed.
+
+        allocator_rebalance is cron'd Monday 09:20 IST only. A service that
+        is down, deploying, or newly created at that moment holds NO
+        positions until the FOLLOWING Monday, with nothing in the logs
+        saying so — that is exactly what happened here: the job had never
+        executed once since the Render deploy. is_due() is week-based and
+        DB-backed, so this cannot double-trade: once a rebalance is
+        recorded for the current ISO week, restarts are no-ops.
+        """
+        try:
+            alloc = getattr(hermes, "allocator", None)
+            if alloc is None or not alloc.is_due():
+                logger.info("startup: no rebalance owed this week")
+                return
+            logger.warning("startup: rebalance owed — running catch-up now")
+            res = hermes.run_allocator_rebalance()
+            logger.warning("startup catch-up result: %s",
+                           {k: v for k, v in res.items() if k != "trades"})
+        except Exception:  # noqa: BLE001 — must never block the bot
+            logger.exception("startup allocator catch-up failed")
+
+    threading.Thread(target=_catchup_allocator, daemon=True,
+                     name="alloc-catchup").start()
+
     bot = QuNtraTelegramBot(hermes, alerter=hermes.telegram)
     logger.info("Starting Telegram command center (%d commands) in the "
                "main thread…", len(bot.COMMANDS))
