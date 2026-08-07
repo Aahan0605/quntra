@@ -40,13 +40,15 @@ def main() -> int:
     from src.utils.log_redaction import install_redaction
     install_redaction()
 
-    from scripts.scheduler import (_start_healthcheck_server, build_hermes,
+    from scripts.scheduler import (_start_healthcheck_server,
+                                   _start_keepalive, build_hermes,
                                    build_scheduler)
     from src.alerts.telegram_bot import QuNtraTelegramBot
 
     hermes = build_hermes()
     scheduler = build_scheduler(hermes)
     _start_healthcheck_server()
+    _start_keepalive()
 
     def _run_scheduler():
         logger.info("Scheduler starting in background thread — %d jobs",

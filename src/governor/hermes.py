@@ -293,15 +293,48 @@ class HermesCoordinator:
         return os.environ.get("ENABLE_SIGNAL_COUNCIL_TRADING",
                               "false").lower() == "true"
 
-    def run_allocator_rebalance(self) -> dict:
+    def apply_capital_override(self) -> float | None:
+        """Capital set from the phone (/capital) wins over the deploy's env.
+
+        DAILY_CAPITAL_INR is baked into the Render blueprint, and changing
+        it there needs a dashboard Blueprint sync — not something you can
+        do at 06:00 from a phone. The allocator sizes every position from
+        self.capital at rebalance time, so applying the override here is
+        enough: no restart, no redeploy. Returns the capital now in force.
+        """
+        if self.allocator is None:
+            return None
+        override = (self.get_system_state("capital") or {}).get("inr")
+        if not override:
+            return None
+        old, new = float(self.allocator.capital), float(override)
+        if new == old:
+            return new
+        self.allocator.capital = new
+        # PaperTrader's simulated cash was funded with the OLD number. Without
+        # matching it, the book buys into the new size against a balance that
+        # was never topped up and goes deeply negative — the same class of bug
+        # as starting_cash ignoring DAILY_CAPITAL_INR.
+        if hasattr(self.trader, "cash"):
+            self.trader.cash += new - old
+        logger.warning("capital override applied: %.0f -> %.0f", old, new)
+        return new
+
+    def run_allocator_rebalance(self, force: bool = False) -> dict:
         """Weekly: the live strategy (docs/CEO_REVIEW.md Path A). Vetoed
         tickers excluded, weights scaled by the crash-risk exposure band,
         traded through PaperTrader.adjust_position — no per-ticker stops,
-        managed entirely by weight drift (Rebalancer's own 3%/20% caps)."""
+        managed entirely by weight drift (Rebalancer's own 3%/20% caps).
+
+        force=True bypasses the weekly cadence only. Drift and turnover
+        caps still apply — this re-sizes the book to a changed capital
+        base on demand, it does not licence unlimited trading.
+        """
         if self.allocator is None:
             return {"skipped": "no allocator configured"}
         from src.utils.cache_loader import load_close_panel
 
+        self.apply_capital_override()
         actions: dict = {"steps": []}
         panel = self._safe(lambda: load_close_panel(self.allocator.universe),
                            "load_close_panel", actions)
@@ -310,7 +343,8 @@ class HermesCoordinator:
         crash = self.crash_risk()
         exposure = (crash or {}).get("exposure_multiplier", 1.0)
         result = self._safe(
-            lambda: self.allocator.rebalance(panel, exposure_multiplier=exposure),
+            lambda: self.allocator.rebalance(panel, exposure_multiplier=exposure,
+                                             force=force),
             "allocator_rebalance", actions) or {}
         result["crash_risk"] = crash
         result["steps"] = actions["steps"]

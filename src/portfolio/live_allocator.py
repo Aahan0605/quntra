@@ -98,12 +98,21 @@ class PassiveAllocator:
             return True
         return today.isocalendar()[:2] != last.isocalendar()[:2]
 
-    def rebalance(self, panel, exposure_multiplier: float = 1.0) -> dict:
+    def rebalance(self, panel, exposure_multiplier: float = 1.0,
+                  force: bool = False) -> dict:
         """One rebalance pass: weekly cadence, 3% drift, 20% turnover cap —
-        all enforced by Rebalancer, not reimplemented here."""
+        all enforced by Rebalancer, not reimplemented here.
+
+        force=True drops ONLY the weekly cadence, for a deliberate operator
+        run (e.g. re-sizing the book after a capital change). Drift and
+        turnover caps still bind.
+        """
         today = datetime.now(timezone.utc).date()
         # Seed from the DB so the weekly gate survives restarts.
         self.rebalancer._last_rebalance = self._load_last_rebalance()
+        if force:
+            logger.warning("forced rebalance — weekly cadence bypassed")
+            self.rebalancer._last_rebalance = None
         # ...but a CRISIS de-risk must never wait for the cadence. Without
         # this, a crash on a Wednesday after Monday's rebalance would leave
         # the book fully exposed until the FOLLOWING Monday — the weekly

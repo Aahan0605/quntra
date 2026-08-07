@@ -250,6 +250,42 @@ def dry_run() -> int:
     return 0
 
 
+def _start_keepalive(interval: int = 600) -> None:
+    """Ping our own public URL so the free tier never idles us out.
+
+    Render's free plan spins a web service down after 15 minutes with no
+    INBOUND traffic, and APScheduler fires nothing while it is down — a
+    06:00 pre-market and a 09:15 open would simply never happen, silently.
+    That made the whole schedule depend on an external uptime pinger
+    nobody can see from in here.
+
+    ponytail: this prevents idling, it cannot wake a service that has
+    already spun down (the process is gone; nothing is left to ping). It
+    holds as long as the service is up when this starts. Keep the external
+    pinger as the belt to this pair of braces — or move off the free tier,
+    where the problem does not exist at all.
+    """
+    import os
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    import threading
+    import urllib.request
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                urllib.request.urlopen(f"{url.rstrip('/')}/health", timeout=30)
+            except Exception as e:  # noqa: BLE001 — never kill the thread
+                logger.warning("keepalive ping failed: %s", e)
+
+    threading.Thread(target=_loop, daemon=True, name="keepalive").start()
+    logger.info("Keepalive pinging %s every %ds (free tier sleeps at 15min "
+                "idle, which would silently skip every scheduled job)",
+                url, interval)
+
+
 def _status_token_ok(supplied: str) -> bool:
     """Constant-time check of /status's token against the bot token's hash."""
     import hashlib
@@ -411,6 +447,7 @@ def main() -> int:
     hermes = build_hermes()
     scheduler = build_scheduler(hermes)
     _start_healthcheck_server()
+    _start_keepalive()
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

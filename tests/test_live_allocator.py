@@ -294,3 +294,39 @@ def test_weekly_cadence_survives_restart(tmp_path, monkeypatch):
     assert b.is_due(today) is False
     # ...but a new ISO week is genuinely due again.
     assert b.is_due(today + dt.timedelta(days=8)) is True
+
+
+def test_force_bypasses_only_the_weekly_cadence(monkeypatch):
+    """After a /capital change the book must be re-sizable the same day,
+    without waiting for Monday — but drift/turnover caps still bind."""
+    import pandas as pd
+    from src.portfolio.live_allocator import PassiveAllocator
+
+    class T:
+        ALLOCATOR_PREFIX = "ALLOC:"
+        def get_positions(self): return []
+        def adjust_position(self, *a, **k): return {"status": "OK"}
+
+    a = PassiveAllocator(universe=["A", "B"], trader=T(), capital=10_000.0)
+    seen = {}
+
+    class Reb:
+        _last_rebalance = None
+        def compute_trades(self, cur, tgt, today):
+            seen["last"] = self._last_rebalance
+            class D:
+                should_rebalance = False
+                reason = "weekly cadence"
+            return D()
+
+    a.rebalancer = Reb()
+    monkeypatch.setattr(a, "_load_last_rebalance", lambda: __import__(
+        "datetime").date.today())
+    monkeypatch.setattr(a, "target_weights", lambda *a, **k: {"A": 0.5})
+    monkeypatch.setattr(a, "current_weights", lambda: {})
+    panel = pd.DataFrame({"A": [100.0], "B": [50.0]})
+
+    a.rebalance(panel)
+    assert seen["last"] is not None, "normal run must respect the weekly gate"
+    a.rebalance(panel, force=True)
+    assert seen["last"] is None, "force must clear the weekly gate"

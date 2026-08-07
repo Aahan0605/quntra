@@ -205,7 +205,11 @@ Your AI quantitative research organization
 /obsidian — Regenerate the Obsidian knowledge vault from the database
 /start_trading — Start today's paper session from your phone (no laptop)
 /rebalance — Run the passive allocator NOW (cron is Monday-only)
+/rebalance force — Same, ignoring the weekly cadence (after /capital)
+/capital — Show or set the capital positions are sized from:
+           /capital 10000000
 /breeze_token — Refresh the daily ICICI Breeze session: /breeze_token <token>
+                Also starts the day's pre-market sequence
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 PERFORMANCE
@@ -538,7 +542,7 @@ class QuNtraTelegramBot:
              "📄 Mode: PAPER TRADING (live capital: ₹0)"]
         return "\n".join(lines)
 
-    def cmd_rebalance(self) -> str:
+    def cmd_rebalance(self, *args) -> str:
         """Run the passive allocator now instead of waiting for Monday.
 
         Exists because the scheduled allocator_rebalance is Monday-only, so
@@ -548,8 +552,13 @@ class QuNtraTelegramBot:
         saying so. This is the same run_allocator_rebalance() the cron job
         calls; the Rebalancer's own weekly/3%-drift/20%-turnover gates still
         decide whether anything actually trades.
+
+        /rebalance force drops the weekly cadence only — for re-sizing the
+        book after a /capital change, when this week's rebalance has
+        already been recorded and the plain command would no-op.
         """
-        res = self.hermes.run_allocator_rebalance()
+        force = bool(args) and args[0].strip().lower() == "force"
+        res = self.hermes.run_allocator_rebalance(force=force)
         if res.get("skipped"):
             return f"⚠️ Rebalance skipped: {res['skipped']}"
         if not res.get("rebalanced"):
@@ -828,9 +837,79 @@ class QuNtraTelegramBot:
                     "URL, right after logging in. Send /breeze_token with "
                     "no argument to get a fresh login link.")
         status = token_status()
+        premarket = self._premarket_after_token()
         return (f"✅ Breeze session updated ({token[:6]}…). Status: "
                 f"{status}.\nReal-time quotes should now be flowing "
-                "(falls back to delayed yfinance automatically if not).")
+                f"(falls back to delayed yfinance automatically if not).\n"
+                f"{premarket}")
+
+    def _premarket_after_token(self) -> str:
+        """Kick off the pre-market sequence as soon as the token lands.
+
+        pre_market is cron'd at 06:00 IST but the token usually arrives
+        after that — so the research, watchlist and risk limits for the day
+        were being built from stale/delayed data, or not at all if the run
+        failed without a session. Running it here means the operator's
+        token upload IS the start of the day, whatever time it happens.
+
+        Threaded: the full sequence takes minutes and Telegram times the
+        handler out long before that, which would look like a failure.
+        """
+        import threading
+        from datetime import date
+
+        if not self.hermes:
+            return "⚠️ Pre-market not run — no coordinator attached."
+        today = date.today().isoformat()
+        state = self.hermes.get_system_state("premarket") or {}
+        if str(state.get("started_at", ""))[:10] == today:
+            return ("ℹ️ Pre-market already ran today — not repeating it. "
+                    "Send /start_trading to force a fresh run.")
+
+        def _run():
+            try:
+                self.hermes.run_pre_market_sequence()
+            except Exception:  # noqa: BLE001 — it alerts on its own
+                logger.exception("post-token pre-market run failed")
+
+        threading.Thread(target=_run, daemon=True,
+                         name="premarket-after-token").start()
+        return ("🌅 Pre-market sequence started — research, watchlist and "
+                "risk limits. /status in a few minutes for the watchlist.")
+
+    def cmd_capital(self, *args) -> str:
+        """Set the capital the allocator sizes positions from.
+
+        DAILY_CAPITAL_INR lives in the Render blueprint, and changing it
+        there needs a dashboard Blueprint sync. This writes the override to
+        the DB instead, so it can be done from the phone and survives
+        restarts. Takes effect on the next rebalance — pair it with
+        /rebalance force to apply it immediately.
+        """
+        if not args:
+            current = (self.hermes.get_system_state("capital") or {}).get("inr")
+            live = getattr(getattr(self.hermes, "allocator", None), "capital",
+                           None)
+            return ("Capital in force: "
+                    + (f"₹{live:,.0f}" if live is not None
+                       else "unknown (no allocator attached)") + "\n"
+                    "DB override: "
+                    + (f"₹{current:,.0f}" if current
+                       else "none (using DAILY_CAPITAL_INR)") + "\n"
+                    "Set with: /capital 10000000")
+        raw = args[0].strip().replace(",", "").replace("₹", "")
+        try:
+            amount = float(raw)
+        except ValueError:
+            return f"⚠️ Not a number: {args[0]!r}. Example: /capital 10000000"
+        if amount <= 0:
+            return "⚠️ Capital must be positive."
+        self.hermes.set_system_state("capital", {"inr": amount})
+        applied = self.hermes.apply_capital_override()
+        return (f"✅ Capital set to ₹{amount:,.0f} "
+                f"(allocator now at ₹{applied:,.0f}).\n"
+                "Send /rebalance force to re-size the book to it now — "
+                "otherwise it applies at the next scheduled rebalance.")
 
     def cmd_macro(self) -> str:
         """Latest macro snapshot from the macro agent's stored research."""
@@ -908,6 +987,9 @@ class QuNtraTelegramBot:
         "deep_screen",
         # manual allocator run — the cron job is Monday-only
         "rebalance",
+        # capital override from the phone — the env var needs a Render
+        # Blueprint sync, which you cannot do at 06:00 from a phone
+        "capital",
     ]
 
     def run_polling(self):
